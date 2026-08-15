@@ -1,6 +1,7 @@
 // wl_botoes.js
-// Quiz de WL + aplicação/removal de cargos conforme a sua estrutura.
-// CONFIG no topo — cole os IDs do Discord aqui.
+// Quiz de WL (ephemeral apenas para o usuário que iniciou).
+// CONFIG no topo — cole os IDs do Discord aqui se quiser.
+// Não esqueça de manter o arquivo data.json na raiz.
 
 const fs = require('fs');
 const path = require('path');
@@ -8,11 +9,11 @@ const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('
 
 const CONFIG = {
   DATA_FILE: path.join(__dirname, 'data.json'),
-  WL_ROLE_ID: '1537933883788763177',           // cargo "com id" -> será REMOVIDO se passar no quiz
+   WL_ROLE_ID: '1537933883788763177',           // cargo "com id" -> será REMOVIDO se passar no quiz
   ROLE_NO_REG_ID: '1537876556322570461',   // cargo "sem registro" -> será REMOVIDO se passar no quiz
   REGISTERED_ROLE_ID: '1537843709284982805', // cargo "registrado" -> será ADICIONADO se passar
   STAFF_CHANNEL_ID: '1537883932497018932',    // canal para notificar aprovações (opcional)
-  PASSING_SCORE: 4                              // acertos mínimos para passar
+  PASSING_SCORE: 4                              // acertos mínimos
 };
 
 let client;
@@ -27,12 +28,11 @@ const QUIZ_QUESTIONS = [
   { q: 'Conduta esperada de um whitelistado?', choices: { A: 'Trolar', B: 'Ser tóxico', C: 'Respeitar e ajudar', D: 'Vender contas' }, correct: 'C' }
 ];
 
-const quizSessions = new Map();
-const userSession = new Map();
+const quizSessions = new Map(); // sessionId -> { userId, qIndex, correctCount }
+const userSession = new Map();  // userId -> sessionId
 
 function setup(localClient, overrides = {}) {
   client = localClient;
-  // permitir sobrescrever CONFIG via setup se desejar
   Object.assign(CONFIG, overrides);
   if (overrides.DATA_FILE) CONFIG.DATA_FILE = overrides.DATA_FILE;
 }
@@ -48,40 +48,53 @@ function saveData(data) { fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(data
 
 async function handleInteraction(interaction) {
   try {
-    // inicia o quiz (botão do painel)
+    // Inicia o quiz: botão do painel (publico) -> responder EPHEMERAL só para quem clicou
     if (interaction.isButton() && interaction.customId === 'wl_iniciar') {
+      // evita iniciar se já tiver quiz em andamento para esse user
       if (userSession.has(interaction.user.id)) {
         return interaction.reply({ content: 'Você já tem um quiz em andamento.', ephemeral: true });
       }
+
       const sessionId = Date.now().toString();
       quizSessions.set(sessionId, { userId: interaction.user.id, qIndex: 0, correctCount: 0 });
       userSession.set(interaction.user.id, sessionId);
-      return await sendQuestion(interaction, sessionId);
+
+      // Envia a primeira pergunta EM_EPHEMERAL (reply) — assim Só o usuário verá
+      return await sendQuestion(interaction, sessionId, { initial: true });
     }
 
-    // respostas do quiz: quiz|<sessionId>|<choice>
+    // Respostas: customId = quiz|<sessionId>|<choice>
     if (interaction.isButton() && interaction.customId.startsWith('quiz|')) {
       const [, sessionId, choice] = interaction.customId.split('|');
       const session = quizSessions.get(sessionId);
-      if (!session) return interaction.reply({ content: 'Sessão inválida/expirada.', ephemeral: true });
-      if (interaction.user.id !== session.userId) return interaction.reply({ content: 'Este quiz não é seu.', ephemeral: true });
+      if (!session) return interaction.reply({ content: 'Sessão inválida ou expirada.', ephemeral: true });
+
+      // somente o dono da sessão pode responder
+      if (interaction.user.id !== session.userId) {
+        return interaction.reply({ content: 'Este quiz não é seu.', ephemeral: true });
+      }
 
       const qObj = QUIZ_QUESTIONS[session.qIndex];
       if (choice === qObj.correct) session.correctCount++;
       session.qIndex++;
 
-      if (session.qIndex < QUIZ_QUESTIONS.length) return await sendQuestion(interaction, sessionId);
+      // Se tiver próxima pergunta, atualiza (EPHEMERAL message)
+      if (session.qIndex < QUIZ_QUESTIONS.length) {
+        return await sendQuestion(interaction, sessionId, { initial: false });
+      }
 
       // terminou
       const score = session.correctCount;
       const passed = score >= (CONFIG.PASSING_SCORE || 4);
+
+      // cleanup
       quizSessions.delete(sessionId);
       userSession.delete(interaction.user.id);
 
       if (passed) {
-        await processPass(interaction, score);
+        await onPass(interaction, score);
       } else {
-        await processFail(interaction, score);
+        await onFail(interaction, score);
       }
       return true;
     }
@@ -89,12 +102,47 @@ async function handleInteraction(interaction) {
     return false;
   } catch (err) {
     console.error('wl_botoes error', err);
-    try { if (!interaction.replied) await interaction.reply({ content: 'Erro interno no quiz.', ephemeral: true }); } catch {}
+    try { if (interaction && !interaction.replied) await interaction.reply({ content: 'Erro interno no quiz.', ephemeral: true }); } catch {}
     return false;
   }
 }
 
-async function processPass(interaction, score) {
+async function sendQuestion(interaction, sessionId, opts = { initial: false }) {
+  const session = quizSessions.get(sessionId);
+  if (!session) throw new Error('session not found');
+  const qObj = QUIZ_QUESTIONS[session.qIndex];
+
+  // formata alternativas de forma organizada no description
+  const description = `**${qObj.q}**\n\nA) ${qObj.choices.A}\nB) ${qObj.choices.B}\nC) ${qObj.choices.C}\nD) ${qObj.choices.D}`;
+
+  const embed = new EmbedBuilder()
+    .setTitle(`Pergunta ${session.qIndex + 1}/${QUIZ_QUESTIONS.length}`)
+    .setDescription(description)
+    .setColor('#0e0c0a')
+    .setFooter({ text: `Progresso: ${session.qIndex + 1}/${QUIZ_QUESTIONS.length}` })
+    .setTimestamp();
+
+  const a = new ButtonBuilder().setCustomId(`quiz|${sessionId}|A`).setLabel('A').setStyle(ButtonStyle.Primary);
+  const b = new ButtonBuilder().setCustomId(`quiz|${sessionId}|B`).setLabel('B').setStyle(ButtonStyle.Primary);
+  const c = new ButtonBuilder().setCustomId(`quiz|${sessionId}|C`).setLabel('C').setStyle(ButtonStyle.Primary);
+  const d = new ButtonBuilder().setCustomId(`quiz|${sessionId}|D`).setLabel('D').setStyle(ButtonStyle.Primary);
+  const row = new ActionRowBuilder().addComponents(a, b, c, d);
+
+  try {
+    if (opts.initial) {
+      // inicial: use reply ephemeral (cria mensagem EPHEMERAL apenas para o usuário)
+      await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+    } else {
+      // subsequente: atualiza a mensagem ephemeral (apenas o usuário verá)
+      await interaction.update({ embeds: [embed], components: [row] });
+    }
+  } catch (err) {
+    // fallback: caso update/reply falhe, tenta reply ephemeral
+    try { await interaction.reply({ embeds: [embed], components: [row], ephemeral: true }); } catch (e) { console.error('Erro ao enviar pergunta do quiz:', e); }
+  }
+}
+
+async function onPass(interaction, score) {
   try {
     const guild = interaction.guild;
     const member = await guild.members.fetch(interaction.user.id);
@@ -127,75 +175,46 @@ async function processPass(interaction, score) {
     saveData(data);
 
     // DM de confirmação
-    try { await interaction.user.send(`Parabéns! Você foi aprovado na WL com ${score}/${QUIZ_QUESTIONS.length}. Você recebeu o cargo de registrado.`).catch(()=>{}); } catch {}
+    try { await interaction.user.send(`Parabéns! Você foi aprovado na WL com ${score}/${QUIZ_QUESTIONS.length}. Você recebeu o cargo de registrado.`).catch(()=>{}); } catch(e){}
 
-    // notificar staff
+    // notificar staff channel (opcional)
     try {
       if (CONFIG.STAFF_CHANNEL_ID && CONFIG.STAFF_CHANNEL_ID !== 'COLE_AQUI_STAFF_CHANNEL_ID') {
         const ch = await interaction.guild.channels.fetch(CONFIG.STAFF_CHANNEL_ID);
-        if (ch) {
-          await ch.send({ embeds: [ new EmbedBuilder().setTitle('WL - Usuário Aprovado').setDescription(`${interaction.user.tag} passou no quiz (${score}/${QUIZ_QUESTIONS.length})`).setColor('#2ecc71') ] }).catch(()=>{});
-        }
+        if (ch) await ch.send({ embeds: [ new EmbedBuilder().setTitle('WL - Usuário Aprovado').setDescription(`${interaction.user.tag} passou no quiz (${score}/${QUIZ_QUESTIONS.length})`).setColor('#2ecc71') ] }).catch(()=>{});
       }
-    } catch (err) { console.error('notify staff', err); }
+    } catch (err) { console.error('Erro notify staff', err); }
 
-    // resposta ao usuário
+    // responde ao usuário (ephemeral) -- se veio de uma mensagem ephemeral, interaction.update atualiza ela
     try {
-      await interaction.update({
-        embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Aprovado — ${score}/${QUIZ_QUESTIONS.length}`).setColor('#2ecc71') ],
-        components: []
-      });
+      if (interaction.deferred || interaction.replied) {
+        await interaction.update({ embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Aprovado — ${score}/${QUIZ_QUESTIONS.length}`).setColor('#2ecc71') ], components: [] });
+      } else {
+        await interaction.reply({ embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Aprovado — ${score}/${QUIZ_QUESTIONS.length}`).setColor('#2ecc71') ], ephemeral: true });
+      }
     } catch {
-      await interaction.reply({ embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Aprovado — ${score}/${QUIZ_QUESTIONS.length}`).setColor('#2ecc71') ], ephemeral: true });
+      try { await interaction.reply({ embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Aprovado — ${score}/${QUIZ_QUESTIONS.length}`).setColor('#2ecc71') ], ephemeral: true }); } catch {}
     }
   } catch (err) {
-    console.error('processPass error', err);
-    try { await interaction.reply({ content: 'Erro ao processar aprovação.', ephemeral: true }); } catch {}
+    console.error('onPass error', err);
+    try { if (!interaction.replied) await interaction.reply({ content: 'Erro ao processar aprovação.', ephemeral: true }); } catch {}
   }
 }
 
-async function processFail(interaction, score) {
+async function onFail(interaction, score) {
   try {
-    try { await interaction.user.send(`Você acertou ${score}/${QUIZ_QUESTIONS.length}. Não atingiu o mínimo de ${CONFIG.PASSING_SCORE || 4}. Tente novamente mais tarde.`).catch(()=>{}); } catch {}
+    try { await interaction.user.send(`Você acertou ${score}/${QUIZ_QUESTIONS.length}. Não atingiu o mínimo de ${CONFIG.PASSING_SCORE || 4}. Tente novamente mais tarde.`).catch(()=>{}); } catch(e){}
     try {
-      await interaction.update({
-        embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Reprovado — ${score}/${QUIZ_QUESTIONS.length}. Necessário ${CONFIG.PASSING_SCORE || 4}.`).setColor('#e74c3c') ],
-        components: []
-      });
+      if (interaction.deferred || interaction.replied) {
+        await interaction.update({ embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Reprovado — ${score}/${QUIZ_QUESTIONS.length}. Necessário ${CONFIG.PASSING_SCORE || 4}.`).setColor('#e74c3c') ], components: [] });
+      } else {
+        await interaction.reply({ embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Reprovado — ${score}/${QUIZ_QUESTIONS.length}. Necessário ${CONFIG.PASSING_SCORE || 4}.`).setColor('#e74c3c') ], ephemeral: true });
+      }
     } catch {
       await interaction.reply({ embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Reprovado — ${score}/${QUIZ_QUESTIONS.length}. Necessário ${CONFIG.PASSING_SCORE || 4}.`).setColor('#e74c3c') ], ephemeral: true });
     }
   } catch (err) {
-    console.error('processFail error', err);
-  }
-}
-
-async function sendQuestion(interaction, sessionId) {
-  const session = quizSessions.get(sessionId);
-  if (!session) throw new Error('session not found');
-  const qObj = QUIZ_QUESTIONS[session.qIndex];
-
-  const embed = new EmbedBuilder()
-    .setTitle(`Pergunta ${session.qIndex + 1}/${QUIZ_QUESTIONS.length}`)
-    .setDescription(qObj.q)
-    .setColor('#ffb86b')
-    .addFields(
-      { name: 'A', value: qObj.choices.A, inline: true },
-      { name: 'B', value: qObj.choices.B, inline: true },
-      { name: 'C', value: qObj.choices.C, inline: true },
-      { name: 'D', value: qObj.choices.D, inline: true }
-    );
-
-  const a = new ButtonBuilder().setCustomId(`quiz|${sessionId}|A`).setLabel('A').setStyle(ButtonStyle.Primary);
-  const b = new ButtonBuilder().setCustomId(`quiz|${sessionId}|B`).setLabel('B').setStyle(ButtonStyle.Primary);
-  const c = new ButtonBuilder().setCustomId(`quiz|${sessionId}|C`).setLabel('C').setStyle(ButtonStyle.Primary);
-  const d = new ButtonBuilder().setCustomId(`quiz|${sessionId}|D`).setLabel('D').setStyle(ButtonStyle.Primary);
-  const row = new ActionRowBuilder().addComponents(a, b, c, d);
-
-  try {
-    await interaction.update({ embeds: [embed], components: [row], ephemeral: true });
-  } catch (err) {
-    try { await interaction.reply({ embeds: [embed], components: [row], ephemeral: true }); } catch (e) { console.error('Erro ao enviar pergunta:', e); }
+    console.error('onFail error', err);
   }
 }
 
