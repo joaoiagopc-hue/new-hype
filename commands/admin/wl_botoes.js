@@ -1,31 +1,91 @@
-// wl_botoes.js
+// commands/admin/wl_botoes.js
 // Quiz de WL (ephemeral apenas para o usuário que iniciou).
-// CONFIG no topo — cole os IDs do Discord aqui se quiser.
-// Não esqueça de manter o arquivo data.json na raiz.
+// Perguntas: RDM, VDM, POWERGAMING, METAGAMING, AMOR A VIDA, O QUE SIGNIFICA RP
+//
+// CONFIG:
+//  - DATA_FILE: path para data.json (opcional override via setup)
+//  - WL_ROLE_ID, ROLE_NO_REG_ID, REGISTERED_ROLE_ID: cargos opcionais
+//  - STAFF_CHANNEL_ID: canal onde notificações de aprovação/erro serão enviadas (opcional)
+//  - PASSING_SCORE: número mínimo de acertos para passar
+//
+// Use: wlButtons.setup(client, { DATA_FILE: '...', WL_ROLE_ID: 'id', ... })
 
 const fs = require('fs');
 const path = require('path');
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 const CONFIG = {
-  DATA_FILE: path.join(__dirname, 'data.json'),
-   WL_ROLE_ID: '1537933883788763177',           // cargo "com id" -> será REMOVIDO se passar no quiz
-  ROLE_NO_REG_ID: '1537876556322570461',   // cargo "sem registro" -> será REMOVIDO se passar no quiz
-  REGISTERED_ROLE_ID: '1537843709284982805', // cargo "registrado" -> será ADICIONADO se passar
-  STAFF_CHANNEL_ID: '1537883932497018932',    // canal para notificar aprovações (opcional)
-  PASSING_SCORE: 4                              // acertos mínimos
+  DATA_FILE: path.join(__dirname, '..', '..', 'data.json'),
+  WL_ROLE_ID: '1537933883788763177',
+  ROLE_NO_REG_ID: '1537876556322570461',
+  REGISTERED_ROLE_ID: '1537843709284982805',
+  STAFF_CHANNEL_ID: '1538198584032362598',
+  PASSING_SCORE: 4
 };
 
 let client;
 
 const QUIZ_QUESTIONS = [
-  { q: 'Qual atitude NÃO é aceitável durante um roleplay?', choices: { A: 'Respeitar limites', B: 'Metagaming', C: 'Agir no personagem', D: 'Seguir as regras' }, correct: 'B' },
-  { q: 'O que é powergaming?', choices: { A: 'Interpretar com criatividade', B: 'Forçar ações impossíveis sobre outros', C: 'Ajudar aliados', D: 'Reportar bugs' }, correct: 'B' },
-  { q: 'Onde estão as regras de RP do servidor?', choices: { A: 'Canal #regras', B: 'DMs aleatórias', C: 'Dentro do nick', D: 'Sites externos' }, correct: 'A' },
-  { q: 'Se alguém te ferir no RP sem aviso, você deve:', choices: { A: 'Vingar no jogo', B: 'Sair e não reportar', C: 'Reportar ao staff com evidências', D: 'Divulgar no chat' }, correct: 'C' },
-  { q: 'Quantas tentativas imediatas é recomendado?', choices: { A: 'Ilimitado', B: 'Pode haver espera / staff avalia', C: 'Nunca', D: 'Uma vez' }, correct: 'B' },
-  { q: 'O que evita conflitos reais no RP?', choices: { A: 'Separar player do personagem', B: 'Confundir real com RP', C: 'Trolar', D: 'Vazar dados' }, correct: 'A' },
-  { q: 'Conduta esperada de um whitelistado?', choices: { A: 'Trolar', B: 'Ser tóxico', C: 'Respeitar e ajudar', D: 'Vender contas' }, correct: 'C' }
+  {
+    q: 'O que é RDM (Random Deathmatch)?',
+    choices: {
+      A: 'Matar outros jogadores sem motivo de roleplay (aleatoriamente).',
+      B: 'Organizar eventos de PvP com regras claras.',
+      C: 'Fazer trade ou troca de itens entre jogadores.',
+      D: 'Reportar bugs ao staff.'
+    },
+    correct: 'A'
+  },
+  {
+    q: 'O que é VDM (Vehicle Deathmatch)?',
+    choices: {
+      A: 'Usar veículos apenas para roleplay seguro.',
+      B: 'Atacar ou matar outros usando veículos sem contexto RP válido.',
+      C: 'Consertar veículos no servidor.',
+      D: 'Ajudar outros jogadores com transporte.'
+    },
+    correct: 'B'
+  },
+  {
+    q: 'O que é Powergaming?',
+    choices: {
+      A: 'Interpretar seu personagem respeitando limitações e lógica.',
+      B: 'Forçar ações impossíveis sobre outros jogadores sem dar chance de reação.',
+      C: 'Criar histórias consistentes para o personagem.',
+      D: 'Usar apenas itens permitidos pelo servidor.'
+    },
+    correct: 'B'
+  },
+  {
+    q: 'O que é Metagaming?',
+    choices: {
+      A: 'Usar informações do personagem para melhorar o RP.',
+      B: 'Misturar informações do jogador (fora do jogo) e usar dentro do RP para vantagem.',
+      C: 'Ler as regras do servidor.',
+      D: 'Reportar falhas de script.'
+    },
+    correct: 'B'
+  },
+  {
+    q: 'O que significa "Amor à vida" no contexto de RP/servidor (regra social)?',
+    choices: {
+      A: 'Valorizar a continuidade do roleplay, evitando ações que destruam o RP sem motivo (ex.: suicídio repentino, massacres sem contexto).',
+      B: 'Promover brigas pessoais fora do jogo.',
+      C: 'Apostar a vida do personagem em qualquer situação por diversão.',
+      D: 'Divulgar dados pessoais.'
+    },
+    correct: 'A'
+  },
+  {
+    q: 'O que significa RP (Roleplay)?',
+    choices: {
+      A: 'Jogar sem regras ou objetivos.',
+      B: 'Interpretar um personagem com histórico, motivações e agir conforme o mundo do servidor — separar player e personagem.',
+      C: 'Usar cheats para ganhar vantagem.',
+      D: 'Conversar apenas por mensagens privadas.'
+    },
+    correct: 'B'
+  }
 ];
 
 const quizSessions = new Map(); // sessionId -> { userId, qIndex, correctCount }
@@ -41,53 +101,42 @@ function loadData() {
   if (!fs.existsSync(CONFIG.DATA_FILE)) {
     fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify({ nextId: 10, applications: {}, ids: {} }, null, 2));
   }
-  const raw = fs.readFileSync(CONFIG.DATA_FILE, 'utf8') || '{}';
-  try { return JSON.parse(raw); } catch { return { nextId: 10, applications: {}, ids: {} }; }
+  try { return JSON.parse(fs.readFileSync(CONFIG.DATA_FILE, 'utf8') || '{}'); } catch { return { nextId: 10, applications: {}, ids: {} }; }
 }
 function saveData(data) { fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(data, null, 2)); }
 
 async function handleInteraction(interaction) {
   try {
-    // Inicia o quiz: botão do painel (publico) -> responder EPHEMERAL só para quem clicou
+    // inicia quiz (botão público do painel com customId 'wl_iniciar')
     if (interaction.isButton() && interaction.customId === 'wl_iniciar') {
-      // evita iniciar se já tiver quiz em andamento para esse user
       if (userSession.has(interaction.user.id)) {
         return interaction.reply({ content: 'Você já tem um quiz em andamento.', ephemeral: true });
       }
-
       const sessionId = Date.now().toString();
       quizSessions.set(sessionId, { userId: interaction.user.id, qIndex: 0, correctCount: 0 });
       userSession.set(interaction.user.id, sessionId);
-
-      // Envia a primeira pergunta EM_EPHEMERAL (reply) — assim Só o usuário verá
       return await sendQuestion(interaction, sessionId, { initial: true });
     }
 
-    // Respostas: customId = quiz|<sessionId>|<choice>
+    // respostas (quiz|<sessionId>|<choice>)
     if (interaction.isButton() && interaction.customId.startsWith('quiz|')) {
       const [, sessionId, choice] = interaction.customId.split('|');
       const session = quizSessions.get(sessionId);
-      if (!session) return interaction.reply({ content: 'Sessão inválida ou expirada.', ephemeral: true });
+      if (!session) return interaction.reply({ content: 'Sessão inválida/expirada.', ephemeral: true });
 
-      // somente o dono da sessão pode responder
-      if (interaction.user.id !== session.userId) {
-        return interaction.reply({ content: 'Este quiz não é seu.', ephemeral: true });
-      }
+      // somente o dono da sessão responde
+      if (interaction.user.id !== session.userId) return interaction.reply({ content: 'Este quiz não é seu.', ephemeral: true });
 
       const qObj = QUIZ_QUESTIONS[session.qIndex];
       if (choice === qObj.correct) session.correctCount++;
       session.qIndex++;
 
-      // Se tiver próxima pergunta, atualiza (EPHEMERAL message)
-      if (session.qIndex < QUIZ_QUESTIONS.length) {
-        return await sendQuestion(interaction, sessionId, { initial: false });
-      }
+      if (session.qIndex < QUIZ_QUESTIONS.length) return await sendQuestion(interaction, sessionId, { initial: false });
 
       // terminou
       const score = session.correctCount;
       const passed = score >= (CONFIG.PASSING_SCORE || 4);
 
-      // cleanup
       quizSessions.delete(sessionId);
       userSession.delete(interaction.user.id);
 
@@ -101,8 +150,8 @@ async function handleInteraction(interaction) {
 
     return false;
   } catch (err) {
-    console.error('wl_botoes error', err);
-    try { if (interaction && !interaction.replied) await interaction.reply({ content: 'Erro interno no quiz.', ephemeral: true }); } catch {}
+    console.error('wl_botoes error:', err && err.stack ? err.stack : err);
+    try { if (!interaction.replied) await interaction.reply({ content: 'Erro interno no quiz.', ephemeral: true }); } catch {}
     return false;
   }
 }
@@ -112,13 +161,12 @@ async function sendQuestion(interaction, sessionId, opts = { initial: false }) {
   if (!session) throw new Error('session not found');
   const qObj = QUIZ_QUESTIONS[session.qIndex];
 
-  // formata alternativas de forma organizada no description
   const description = `**${qObj.q}**\n\nA) ${qObj.choices.A}\nB) ${qObj.choices.B}\nC) ${qObj.choices.C}\nD) ${qObj.choices.D}`;
 
   const embed = new EmbedBuilder()
     .setTitle(`Pergunta ${session.qIndex + 1}/${QUIZ_QUESTIONS.length}`)
     .setDescription(description)
-    .setColor('#0e0c0a')
+    .setColor('#0f0e0c')
     .setFooter({ text: `Progresso: ${session.qIndex + 1}/${QUIZ_QUESTIONS.length}` })
     .setTimestamp();
 
@@ -130,14 +178,11 @@ async function sendQuestion(interaction, sessionId, opts = { initial: false }) {
 
   try {
     if (opts.initial) {
-      // inicial: use reply ephemeral (cria mensagem EPHEMERAL apenas para o usuário)
       await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
     } else {
-      // subsequente: atualiza a mensagem ephemeral (apenas o usuário verá)
       await interaction.update({ embeds: [embed], components: [row] });
     }
   } catch (err) {
-    // fallback: caso update/reply falhe, tenta reply ephemeral
     try { await interaction.reply({ embeds: [embed], components: [row], ephemeral: true }); } catch (e) { console.error('Erro ao enviar pergunta do quiz:', e); }
   }
 }
@@ -147,20 +192,18 @@ async function onPass(interaction, score) {
     const guild = interaction.guild;
     const member = await guild.members.fetch(interaction.user.id);
 
-    // remove cargo com id
+    // remove cargo WL_ROLE_ID/ROLE_NO_REG_ID e adiciona REGISTERED_ROLE_ID se configurados
     if (CONFIG.WL_ROLE_ID && CONFIG.WL_ROLE_ID !== 'COLE_AQUI_WL_ROLE_ID') {
       try { if (member.roles.cache.has(CONFIG.WL_ROLE_ID)) await member.roles.remove(CONFIG.WL_ROLE_ID, 'Passou na WL - remover cargo com id'); } catch(e){ console.error('remove WL_ROLE', e); }
     }
-    // remove cargo sem registro
     if (CONFIG.ROLE_NO_REG_ID && CONFIG.ROLE_NO_REG_ID !== 'COLE_AQUI_ROLE_NO_REG_ID') {
       try { if (member.roles.cache.has(CONFIG.ROLE_NO_REG_ID)) await member.roles.remove(CONFIG.ROLE_NO_REG_ID, 'Passou na WL - remover cargo sem registro'); } catch(e){ console.error('remove NO_REG', e); }
     }
-    // adiciona registrado
     if (CONFIG.REGISTERED_ROLE_ID && CONFIG.REGISTERED_ROLE_ID !== 'COLE_AQUI_REGISTERED_ROLE_ID') {
       try { await member.roles.add(CONFIG.REGISTERED_ROLE_ID, 'Passou na WL - adicionar cargo registrado'); } catch(e){ console.error('add REGISTERED', e); }
     }
 
-    // salva histórico
+    // salva histórico no data.json
     const data = loadData();
     const appId = Date.now().toString();
     data.applications = data.applications || {};
@@ -180,12 +223,12 @@ async function onPass(interaction, score) {
     // notificar staff channel (opcional)
     try {
       if (CONFIG.STAFF_CHANNEL_ID && CONFIG.STAFF_CHANNEL_ID !== 'COLE_AQUI_STAFF_CHANNEL_ID') {
-        const ch = await interaction.guild.channels.fetch(CONFIG.STAFF_CHANNEL_ID);
+        const ch = await interaction.guild.channels.fetch(CONFIG.STAFF_CHANNEL_ID).catch(()=>null);
         if (ch) await ch.send({ embeds: [ new EmbedBuilder().setTitle('WL - Usuário Aprovado').setDescription(`${interaction.user.tag} passou no quiz (${score}/${QUIZ_QUESTIONS.length})`).setColor('#2ecc71') ] }).catch(()=>{});
       }
     } catch (err) { console.error('Erro notify staff', err); }
 
-    // responde ao usuário (ephemeral) -- se veio de uma mensagem ephemeral, interaction.update atualiza ela
+    // responde ao usuário (ephemeral)
     try {
       if (interaction.deferred || interaction.replied) {
         await interaction.update({ embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Aprovado — ${score}/${QUIZ_QUESTIONS.length}`).setColor('#2ecc71') ], components: [] });
@@ -196,7 +239,7 @@ async function onPass(interaction, score) {
       try { await interaction.reply({ embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Aprovado — ${score}/${QUIZ_QUESTIONS.length}`).setColor('#2ecc71') ], ephemeral: true }); } catch {}
     }
   } catch (err) {
-    console.error('onPass error', err);
+    console.error('onPass error', err && err.stack ? err.stack : err);
     try { if (!interaction.replied) await interaction.reply({ content: 'Erro ao processar aprovação.', ephemeral: true }); } catch {}
   }
 }
@@ -214,7 +257,7 @@ async function onFail(interaction, score) {
       await interaction.reply({ embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Reprovado — ${score}/${QUIZ_QUESTIONS.length}. Necessário ${CONFIG.PASSING_SCORE || 4}.`).setColor('#e74c3c') ], ephemeral: true });
     }
   } catch (err) {
-    console.error('onFail error', err);
+    console.error('onFail error', err && err.stack ? err.stack : err);
   }
 }
 

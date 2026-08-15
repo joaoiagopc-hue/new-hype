@@ -8,12 +8,8 @@ const express = require('express');
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
 
 const DATA_FILE = path.join(__dirname, 'data.json');
-// garante data.json
-if (!fs.existsSync(DATA_FILE)) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify({ nextId: 10, applications: {}, ids: {} }, null, 2));
-}
+if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify({ nextId: 10, applications: {}, ids: {} }, null, 2));
 
-// cria client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -24,15 +20,14 @@ const client = new Client({
   partials: [ Partials.Channel ]
 });
 
-// IMPORTA MÓDULOS (ajuste paths se seus arquivos estiverem em pastas diferentes)
-const wl = require('./commands/rp/wl');                     // painel WL
-const wlButtons = require('./commands/admin/wl_botoes');    // quiz / WL buttons
-const idModule = require('./commands/rp/id');               // comando !id
-const idButtons = require('./commands/admin/id_botoes');    // buttons que atribuem ID
-const ticket = require('./commands/rp/ticket');             // painel ticket
-const ticketButtons = require('./commands/admin/ticket_botoes'); // ticket handler
+// imports (ajuste paths se necessário)
+const wl = require('./commands/rp/wl');
+const wlButtons = require('./commands/admin/wl_botoes');
+const idModule = require('./commands/rp/id');
+const idButtons = require('./commands/admin/id_botoes');
+const ticket = require('./commands/rp/ticket');
+const ticketButtons = require('./commands/admin/ticket_botoes');
 
-// common options (passa o path do data file se os módulos suportarem override)
 const commonOptions = { DATA_FILE };
 
 try { wl.setup(client, commonOptions); } catch (e) { console.warn('wl.setup failed', e); }
@@ -46,7 +41,7 @@ client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-// Prefix commands
+// prefix commands
 const PREFIX = '!';
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
@@ -72,16 +67,14 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// Interaction routing + erro tratado com logging detalhado
+// interaction routing + improved error logging
 client.on('interactionCreate', async (interaction) => {
   try {
-    // ordem: WL quiz (usuário), ID buttons (staff), tickets
     if (await wlButtons.handleInteraction(interaction)) return;
     if (await idButtons.handleInteraction(interaction)) return;
     if (await ticketButtons.handleInteraction(interaction)) return;
-    // outros handlers...
   } catch (err) {
-    // Log detalhado (stack + contexto)
+    // log completo no console
     console.error('interactionCreate error:', {
       message: err && err.message ? err.message : String(err),
       stack: err && err.stack ? err.stack : null,
@@ -92,26 +85,21 @@ client.on('interactionCreate', async (interaction) => {
       time: new Date().toISOString()
     });
 
-    // tenta notificar canal de staff (se existir CONFIG no ticket_botoes)
+    // NOTIFICA APENAS O CANAL DE STAFF (se configurado no ticket_botoes)
     try {
       const ticketModule = require('./commands/admin/ticket_botoes');
-      const cfg = ticketModule && ticketModule.CONFIG ? ticketModule.CONFIG : null;
-      if (cfg && cfg.STAFF_ROLE_ID && cfg.STAFF_ROLE_ID !== 'COLE_AQUI_STAFF_ROLE_ID') {
-        // se tiver STAFF_CHANNEL_ID também tentamos notificar por lá
-        const channelId = cfg.EVALUATIONS_CHANNEL_ID || cfg.STAFF_CHANNEL_ID || null;
-        if (channelId) {
-          const ch = await client.channels.fetch(channelId).catch(()=>null);
-          if (ch) {
-            const shortMsg = `Erro interno no bot: ${err && err.message ? err.message : 'see logs'}`;
-            await ch.send(shortMsg).catch(()=>{});
-          }
+      const staffChanId = ticketModule && ticketModule.CONFIG && ticketModule.CONFIG.STAFF_CHANNEL_ID ? ticketModule.CONFIG.STAFF_CHANNEL_ID : null;
+      if (staffChanId && staffChanId !== 'COLE_AQUI_STAFF_CHANNEL_ID') {
+        const ch = await client.channels.fetch(staffChanId).catch(()=>null);
+        if (ch) {
+          const shortMsg = `⚠️ Erro interno detectado: ${err && err.message ? err.message : 'ver console'}`;
+          await ch.send({ content: shortMsg }).catch(()=>{});
         }
       }
     } catch (e) {
       // ignore
     }
 
-    // resposta curta pro usuário
     try { if (!interaction.replied) await interaction.reply({ content: 'Erro interno.', ephemeral: true }); } catch (e) { /* ignore */ }
   }
 });
@@ -123,9 +111,8 @@ http.createServer(app).listen(process.env.PORT ? Number(process.env.PORT) : 3000
   console.log('Health server listening');
 });
 
-// login
 if (!process.env.DISCORD_TOKEN) {
-  console.error('DISCORD_TOKEN não definido no ambiente!');
+  console.error('DISCORD_TOKEN não definido!');
   process.exit(1);
 }
 client.login(process.env.DISCORD_TOKEN).catch(err => {
