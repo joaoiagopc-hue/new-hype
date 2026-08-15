@@ -1,8 +1,8 @@
 // commands/rp/ticket.js
-// Painel HYPE de tickets — opções: Denúncia, Suporte, Compras
+// Painel HYPE de tickets — agora usa BOTÕES (Denúncia / Suporte / Compras)
 // Uso: !painel-ticket (requer Manage Guild para postar o painel)
 
-const { EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 const CONFIG = {
   PANEL_TITLE: 'Atendimento HYPE',
@@ -34,22 +34,17 @@ async function onTicketCommand(message) {
 
     const embed = new EmbedBuilder()
       .setTitle(CONFIG.PANEL_TITLE)
-      .setDescription('Precisa de ajuda? Escolha abaixo o tipo de atendimento que deseja: Denúncia, Suporte ou Compras. Apenas você e a staff terão acesso ao ticket.')
+      .setDescription('Precisa de ajuda? Clique em um dos botões abaixo para abrir um ticket: Denúncia, Suporte ou Compras. Apenas você e a staff terão acesso ao ticket.')
       .setColor('#8a2be2')
-      .setFooter({ text: 'Selecione o tipo e seu ticket será aberto automaticamente.' });
+      .setFooter({ text: 'Clique no tipo de atendimento e seu ticket será aberto automaticamente.' });
 
     if (CONFIG.BANNER_IMAGE) embed.setImage(CONFIG.BANNER_IMAGE);
 
-    const select = new StringSelectMenuBuilder()
-      .setCustomId('ticket_open_select')
-      .setPlaceholder('Selecione o tipo de atendimento')
-      .addOptions([
-        { label: 'Denúncia', value: 'denuncia', description: 'Relatar comportamento que viole as regras', emoji: '🚨' },
-        { label: 'Suporte', value: 'suporte', description: 'Atendimento geral / dúvidas', emoji: '🎯' },
-        { label: 'Compras', value: 'compras', description: 'Dúvidas sobre compras e produtos', emoji: '🛒' }
-      ]);
+    const btnDenuncia = new ButtonBuilder().setCustomId('ticket_open_denuncia').setLabel('Denúncia').setStyle(ButtonStyle.Danger).setEmoji('🚨');
+    const btnSuporte = new ButtonBuilder().setCustomId('ticket_open_suporte').setLabel('Suporte').setStyle(ButtonStyle.Primary).setEmoji('🎯');
+    const btnCompras = new ButtonBuilder().setCustomId('ticket_open_compras').setLabel('Compras').setStyle(ButtonStyle.Success).setEmoji('🛒');
 
-    const row = new ActionRowBuilder().addComponents(select);
+    const row = new ActionRowBuilder().addComponents(btnDenuncia, btnSuporte, btnCompras);
     await message.channel.send({ embeds: [embed], components: [row] });
     await message.reply({ content: 'Painel de atendimento HYPE enviado.', ephemeral: true });
   } catch (err) {
