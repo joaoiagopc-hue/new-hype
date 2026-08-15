@@ -20,22 +20,24 @@ const client = new Client({
   partials: [ Partials.Channel ]
 });
 
-// imports (ajuste paths se necessário)
-const wl = require('./commands/rp/wl');
-const wlButtons = require('./commands/admin/wl_botoes');
-const idModule = require('./commands/rp/id');
-const idButtons = require('./commands/admin/id_botoes');
+// imports - ajuste caminhos se sua estrutura for diferente
+const wl = require('./commands/rp/wl');                     // opcional: se tiver
+const wlButtons = require('./commands/admin/wl_botoes');    // opcional
+const idModule = require('./commands/rp/id');               // opcional
+const idButtons = require('./commands/admin/id_botoes');    // opcional
 const ticket = require('./commands/rp/ticket');
 const ticketButtons = require('./commands/admin/ticket_botoes');
+const quickTeste = require('./commands/admin/quick-teste');
 
 const commonOptions = { DATA_FILE };
 
-try { wl.setup(client, commonOptions); } catch (e) { console.warn('wl.setup failed', e); }
-try { wlButtons.setup(client, commonOptions); } catch (e) { console.warn('wl_botoes.setup failed', e); }
-try { idModule.setup(client, commonOptions); } catch (e) { console.warn('id.setup failed', e); }
-try { idButtons.setup(client, commonOptions); } catch (e) { console.warn('id_botoes.setup failed', e); }
-try { ticket.setup(client, commonOptions); } catch (e) { console.warn('ticket.setup failed', e); }
-try { ticketButtons.setup(client, commonOptions); } catch (e) { console.warn('ticket_botoes.setup failed', e); }
+// try setup modules if exist
+try { wl && wl.setup && wl.setup(client, commonOptions); } catch (e) { console.warn('wl.setup failed', e); }
+try { wlButtons && wlButtons.setup && wlButtons.setup(client, commonOptions); } catch (e) { console.warn('wl_botoes.setup failed', e); }
+try { idModule && idModule.setup && idModule.setup(client, commonOptions); } catch (e) { console.warn('id.setup failed', e); }
+try { idButtons && idButtons.setup && idButtons.setup(client, commonOptions); } catch (e) { console.warn('id_botoes.setup failed', e); }
+try { ticket.setup && ticket.setup(client, commonOptions); } catch (e) { console.warn('ticket.setup failed', e); }
+try { ticketButtons && ticketButtons.setup && ticketButtons.setup(client, commonOptions); } catch (e) { console.warn('ticket_botoes.setup failed', e); }
 
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
@@ -51,18 +53,18 @@ client.on('messageCreate', async (message) => {
   const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
   const cmd = args.shift().toLowerCase();
 
-  if (cmd === 'painel-wl') {
-    try { await wl.onPainelCommand(message); } catch (err) { console.error('onPainelCommand error', err); }
-    return;
-  }
-
   if (cmd === 'painel-ticket' || cmd === 'ticket') {
     try { await ticket.onTicketCommand(message); } catch (err) { console.error('onTicketCommand error', err); }
     return;
   }
 
+  if (cmd === 'test-channel' || cmd === 'test-channel') {
+    try { await quickTeste.run(message); } catch (err) { console.error('quick-teste error', err); }
+    return;
+  }
+
   if (cmd === 'id') {
-    try { await idModule.onIdCommand(message); } catch (err) { console.error('onIdCommand error', err); }
+    try { idModule && idModule.onIdCommand && idModule.onIdCommand(message); } catch (err) { console.error('onIdCommand error', err); }
     return;
   }
 });
@@ -70,9 +72,9 @@ client.on('messageCreate', async (message) => {
 // interaction routing + improved error logging
 client.on('interactionCreate', async (interaction) => {
   try {
-    if (await wlButtons.handleInteraction(interaction)) return;
-    if (await idButtons.handleInteraction(interaction)) return;
-    if (await ticketButtons.handleInteraction(interaction)) return;
+    if (await (wlButtons && wlButtons.handleInteraction ? wlButtons.handleInteraction(interaction) : false)) return;
+    if (await (idButtons && idButtons.handleInteraction ? idButtons.handleInteraction(interaction) : false)) return;
+    if (await (ticketButtons && ticketButtons.handleInteraction ? ticketButtons.handleInteraction(interaction) : false)) return;
   } catch (err) {
     // log completo no console
     console.error('interactionCreate error:', {
@@ -85,10 +87,10 @@ client.on('interactionCreate', async (interaction) => {
       time: new Date().toISOString()
     });
 
-    // NOTIFICA APENAS O CANAL DE STAFF (se configurado no ticket_botoes)
+    // Notifica apenas canal de staff (se configurado)
     try {
-      const ticketModule = require('./commands/admin/ticket_botoes');
-      const staffChanId = ticketModule && ticketModule.CONFIG && ticketModule.CONFIG.STAFF_CHANNEL_ID ? ticketModule.CONFIG.STAFF_CHANNEL_ID : null;
+      const tb = require('./commands/admin/ticket_botoes');
+      const staffChanId = tb && tb.CONFIG && tb.CONFIG.STAFF_CHANNEL_ID ? tb.CONFIG.STAFF_CHANNEL_ID : null;
       if (staffChanId && staffChanId !== 'COLE_AQUI_STAFF_CHANNEL_ID') {
         const ch = await client.channels.fetch(staffChanId).catch(()=>null);
         if (ch) {
@@ -96,23 +98,22 @@ client.on('interactionCreate', async (interaction) => {
           await ch.send({ content: shortMsg }).catch(()=>{});
         }
       }
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) { /* ignore */ }
 
     try { if (!interaction.replied) await interaction.reply({ content: 'Erro interno.', ephemeral: true }); } catch (e) { /* ignore */ }
   }
 });
 
-// health server
+// health server (Render)
 const app = express();
 app.get('/health', (req, res) => res.status(200).send('OK'));
 http.createServer(app).listen(process.env.PORT ? Number(process.env.PORT) : 3000, () => {
   console.log('Health server listening');
 });
 
+// login
 if (!process.env.DISCORD_TOKEN) {
-  console.error('DISCORD_TOKEN não definido!');
+  console.error('DISCORD_TOKEN não definido no ambiente!');
   process.exit(1);
 }
 client.login(process.env.DISCORD_TOKEN).catch(err => {

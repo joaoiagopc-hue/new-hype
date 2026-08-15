@@ -1,12 +1,6 @@
 // commands/admin/ticket_botoes.js
-// Handler de botões/seletores para sistema de tickets (agora aceita botões do painel).
-// CONFIG no topo — cole os IDs do Discord aqui.
-//
-// CONFIG fields:
-//  - TICKETS_CATEGORY_ID: (opcional) ID da categoria onde tickets serão criados
-//  - STAFF_ROLE_ID: ID do cargo da staff (obrigatório para ações de staff)
-//  - STAFF_CHANNEL_ID: (opcional) canal onde notificações de erro/alerts serão enviadas
-//  - EVALUATIONS_CHANNEL_ID: (opcional) canal para onde avaliações de tickets serão postadas
+// Handler de botões para sistema de tickets (Denúncia / Suporte / Compras).
+// CONFIG: preencha as COLE_AQUI_* com suas IDs.
 
 const {
   ActionRowBuilder,
@@ -22,15 +16,14 @@ const {
 } = require('discord.js');
 
 const CONFIG = {
-  TICKETS_CATEGORY_ID: '1537936531761930370',
-  STAFF_ROLE_ID: '1537883932497018932',
-  STAFF_CHANNEL_ID: '1537937385852243968',
-  EVALUATIONS_CHANNEL_ID: '1537936623684165652'
+  TICKETS_CATEGORY_ID: '1537936531761930370',    // opcional (categoria)
+  STAFF_ROLE_ID: '1537883932497018932',               // obrigatório para ações de staff
+  STAFF_CHANNEL_ID: '1537937385852243968',         // opcional: canal para receber stacks/erros
+  EVALUATIONS_CHANNEL_ID: '1537936623684165652' // opcional: canal para avaliações
 };
 
 let client;
-// in-memory tickets map: channelId -> { openerId, attendantId }
-const tickets = new Map();
+const tickets = new Map(); // channelId -> { openerId, attendantId }
 
 function setup(localClient, overrides = {}) {
   client = localClient;
@@ -45,29 +38,28 @@ function setup(localClient, overrides = {}) {
 
 async function handleInteraction(interaction) {
   try {
-    // lidando apenas com botões, selects e modals relevantes
     if (!interaction.isButton() && !interaction.isModalSubmit() && !interaction.isStringSelectMenu()) return false;
 
-    // --- NOVO: Painel com botões -> abrir ticket
+    // Abrir ticket via botões do painel: customId = ticket_open_denuncia | ticket_open_suporte | ticket_open_compras
     if (interaction.isButton() && interaction.customId && interaction.customId.startsWith('ticket_open_')) {
       try {
         const typeKey = interaction.customId.replace('ticket_open_', ''); // 'denuncia' | 'suporte' | 'compras'
         const typeLabel = { denuncia: 'Denúncia', suporte: 'Suporte', compras: 'Compras' }[typeKey] || 'Atendimento';
         const guild = interaction.guild;
         if (!guild) {
-          await interaction.reply({ content: 'Este painel só funciona no servidor.', ephemeral: true });
+          await interaction.reply({ content: 'Este painel só funciona dentro do servidor.', ephemeral: true });
           return true;
         }
 
-        // checar permissão do bot para criar canais
+        // permissões do bot
         try {
           const botMember = guild.members.me;
           if (!botMember || !botMember.permissions.has(PermissionFlagsBits.ManageChannels)) {
-            await interaction.reply({ content: 'Erro: o bot precisa da permissão "Gerenciar Canais" para abrir tickets. Peça ao admin para dar essa permissão.', ephemeral: true });
+            await interaction.reply({ content: 'O bot precisa da permissão "Gerenciar Canais" para abrir tickets. Peça ao admin para conceder.', ephemeral: true });
             return true;
           }
         } catch (e) {
-          console.warn('Aviso: não foi possível checar guild.members.me — continuando. Erro:', e?.message || e);
+          console.warn('Não foi possível checar guild.members.me — continuando:', e?.message || e);
         }
 
         const name = `ticket-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 90);
@@ -85,21 +77,17 @@ async function handleInteraction(interaction) {
           overwrites.push({ id: CONFIG.STAFF_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
         }
 
-        // resolve parent/category se configurado
         let parentOption;
         if (CONFIG.TICKETS_CATEGORY_ID && CONFIG.TICKETS_CATEGORY_ID !== 'COLE_AQUI_TICKETS_CATEGORY_ID') {
           try {
-            const parentCh = await guild.channels.fetch(CONFIG.TICKETS_CATEGORY_ID).catch(() => null);
+            const parentCh = await guild.channels.fetch(CONFIG.TICKETS_CATEGORY_ID).catch(()=>null);
             if (parentCh && parentCh.type === ChannelType.GuildCategory) parentOption = parentCh.id;
-            else {
-              console.warn('TICKETS_CATEGORY_ID configurada inválida ou não é categoria:', CONFIG.TICKETS_CATEGORY_ID);
-            }
+            else console.warn('TICKETS_CATEGORY_ID inválida ou não é categoria:', CONFIG.TICKETS_CATEGORY_ID);
           } catch (e) {
-            console.warn('Erro ao buscar categoria de tickets:', e && e.stack ? e.stack : e);
+            console.warn('Erro ao buscar categoria de tickets:', e?.message || e);
           }
         }
 
-        // criar canal
         let channel;
         try {
           channel = await guild.channels.create({
@@ -111,19 +99,18 @@ async function handleInteraction(interaction) {
         } catch (err) {
           console.error('Erro criando canal de ticket:', err && err.stack ? err.stack : err);
           await notifyStaff(`Erro criando canal de ticket: ${err && err.message ? err.message : String(err)}`, err);
-          await safeReply(interaction, 'Erro ao criar o canal do ticket. Verifique permissões do bot e se a categoria existe.');
+          await safeReply(interaction, 'Erro ao criar o canal do ticket. Verifique permissões do bot e a categoria.');
           return true;
         }
 
-        // message inicial no ticket
         const atenderBtn = new ButtonBuilder().setCustomId(`ticket_atender_${channel.id}`).setLabel('Atender').setStyle(ButtonStyle.Success);
         const trocarBtn = new ButtonBuilder().setCustomId(`ticket_trocar_${channel.id}`).setLabel('Trocar atendente').setStyle(ButtonStyle.Primary);
         const fecharBtn = new ButtonBuilder().setCustomId(`ticket_fechar_${channel.id}`).setLabel('Fechar ticket').setStyle(ButtonStyle.Danger);
 
         const embed = new EmbedBuilder()
           .setTitle(`Ticket - ${typeLabel}`)
-          .setDescription(`Olá <@${interaction.user.id}> — descreva seu problema aqui.\n\nA equipe HYPE atenderá seu ticket em breve.`)
-          .setColor('#030303');
+          .setDescription(`Olá <@${interaction.user.id}> — descreva seu problema aqui. A equipe HYPE atenderá seu ticket em breve.`)
+          .setColor('#000000');
 
         try {
           await channel.send({ content: `<@${interaction.user.id}>`, embeds: [embed], components: [ new ActionRowBuilder().addComponents(atenderBtn, trocarBtn, fecharBtn) ] });
@@ -143,9 +130,7 @@ async function handleInteraction(interaction) {
       }
     }
 
-    // --- resto das branches: atender/trocar/fechar/select de atribuição/modal/ratings
-    // Reaproveitei a lógica das versões anteriores (atender/trocar/fechar/assign/close/rating)
-    // Atender / Trocar / Fechar
+    // Botões internos do ticket: atender, trocar, fechar
     if (interaction.isButton() && (interaction.customId.startsWith('ticket_atender_') || interaction.customId.startsWith('ticket_trocar_') || interaction.customId.startsWith('ticket_fechar_'))) {
       const parts = interaction.customId.split('_');
       const action = parts[1];
@@ -231,7 +216,7 @@ async function handleInteraction(interaction) {
       return interaction.reply({ content: `Atendente alterado para <@${selected}>.`, ephemeral: true });
     }
 
-    // Modal submit for closing ticket
+    // Modal submit para fechar ticket
     if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_close_modal|')) {
       const channelId = interaction.customId.split('|')[1];
       const ticket = tickets.get(channelId);
@@ -304,7 +289,7 @@ async function handleInteraction(interaction) {
                 { name: 'Usuário (opener)', value: openerId ? `<@${openerId}>` : 'Desconhecido', inline: false },
                 { name: 'Atendente', value: attendantId ? `<@${attendantId}>` : 'Sem atendente', inline: false }
               )
-              .setColor('#000000')
+              .setColor('#080808')
               .setTimestamp();
             await ch.send({ embeds: [embed] }).catch((e) => console.error('Erro enviando avaliação para canal:', e && e.stack ? e.stack : e));
           }
@@ -331,19 +316,17 @@ async function handleInteraction(interaction) {
   }
 }
 
-// helper safe reply
 async function safeReply(interaction, message) {
   try {
     if (!interaction) return;
     if (interaction.deferred || interaction.replied) {
-      try { await interaction.followUp({ content: message, ephemeral: true }); } catch { /* ignore */ }
+      try { await interaction.followUp({ content: message, ephemeral: true }); } catch {}
     } else {
-      try { await interaction.reply({ content: message, ephemeral: true }); } catch { /* ignore */ }
+      try { await interaction.reply({ content: message, ephemeral: true }); } catch {}
     }
   } catch (e) { console.error('safeReply error', e && e.stack ? e.stack : e); }
 }
 
-// helper notify staff with stack
 async function notifyStaff(shortMsg, err) {
   try {
     if (!CONFIG.STAFF_CHANNEL_ID || CONFIG.STAFF_CHANNEL_ID === 'COLE_AQUI_STAFF_CHANNEL_ID') return;
