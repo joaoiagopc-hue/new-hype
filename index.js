@@ -21,18 +21,18 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers
   ],
-  partials: [Partials.Channel]
+  partials: [ Partials.Channel ]
 });
 
-// IMPORTA MÓDULOS (ajustado para sua estrutura de pastas)
+// IMPORTA MÓDULOS (ajuste paths se seus arquivos estiverem em pastas diferentes)
 const wl = require('./commands/rp/wl');                     // painel WL
 const wlButtons = require('./commands/admin/wl_botoes');    // quiz / WL buttons
 const idModule = require('./commands/rp/id');               // comando !id
 const idButtons = require('./commands/admin/id_botoes');    // buttons que atribuem ID
 const ticket = require('./commands/rp/ticket');             // painel ticket
-const ticketButtons = require('./commands/admin/ticket_botoes'); // ticket button handlers
+const ticketButtons = require('./commands/admin/ticket_botoes'); // ticket handler
 
-// passa config/overrides (opcional) para cada módulo — principalmente o caminho do data file
+// common options (passa o path do data file se os módulos suportarem override)
 const commonOptions = { DATA_FILE };
 
 try { wl.setup(client, commonOptions); } catch (e) { console.warn('wl.setup failed', e); }
@@ -72,17 +72,47 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// Interaction routing
+// Interaction routing + erro tratado com logging detalhado
 client.on('interactionCreate', async (interaction) => {
   try {
     // ordem: WL quiz (usuário), ID buttons (staff), tickets
     if (await wlButtons.handleInteraction(interaction)) return;
     if (await idButtons.handleInteraction(interaction)) return;
     if (await ticketButtons.handleInteraction(interaction)) return;
-    // outros handlers podem seguir
+    // outros handlers...
   } catch (err) {
-    console.error('interactionCreate error', err);
-    try { if (!interaction.replied) await interaction.reply({ content: 'Erro interno.', ephemeral: true }); } catch {}
+    // Log detalhado (stack + contexto)
+    console.error('interactionCreate error:', {
+      message: err && err.message ? err.message : String(err),
+      stack: err && err.stack ? err.stack : null,
+      interactionType: interaction?.type,
+      customId: interaction?.customId || null,
+      userId: interaction?.user?.id || null,
+      guildId: interaction?.guild?.id || null,
+      time: new Date().toISOString()
+    });
+
+    // tenta notificar canal de staff (se existir CONFIG no ticket_botoes)
+    try {
+      const ticketModule = require('./commands/admin/ticket_botoes');
+      const cfg = ticketModule && ticketModule.CONFIG ? ticketModule.CONFIG : null;
+      if (cfg && cfg.STAFF_ROLE_ID && cfg.STAFF_ROLE_ID !== 'COLE_AQUI_STAFF_ROLE_ID') {
+        // se tiver STAFF_CHANNEL_ID também tentamos notificar por lá
+        const channelId = cfg.EVALUATIONS_CHANNEL_ID || cfg.STAFF_CHANNEL_ID || null;
+        if (channelId) {
+          const ch = await client.channels.fetch(channelId).catch(()=>null);
+          if (ch) {
+            const shortMsg = `Erro interno no bot: ${err && err.message ? err.message : 'see logs'}`;
+            await ch.send(shortMsg).catch(()=>{});
+          }
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    // resposta curta pro usuário
+    try { if (!interaction.replied) await interaction.reply({ content: 'Erro interno.', ephemeral: true }); } catch (e) { /* ignore */ }
   }
 });
 
