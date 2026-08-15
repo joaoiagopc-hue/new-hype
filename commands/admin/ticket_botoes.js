@@ -1,341 +1,186 @@
-/* commands/admin/ticket_botoes.js
-   Gerencia interações de tickets: criação de canal, atender, trocar atendente, fechar (modal),
-   pedido de avaliação (1-5) e log de avaliações.
-*/
+// ticket_botoes.js
+// Handler de botões para sistema de tickets.
+// CONFIG no topo — cole os IDs do Discord aqui.
 
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ChannelType, PermissionsBitField } = require('discord.js');
-const dataStore = require('../../dataStore');
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionFlagsBits, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder } = require('discord.js');
 
-/*
- CONFIG - cole os IDs aqui (ou use .env)
- - STAFF_ROLE_ID: cargo que será marcado como staff
- - TICKET_CATEGORY_ID: categoria onde os canais de ticket serão criados
- - TICKET_LOG_CHANNEL_ID: canal onde logs de fechamento/avaliação irão (opcional)
- - TICKET_EVAL_CHANNEL_ID: canal onde será enviada a avaliação (opcional)
-*/
 const CONFIG = {
-  STAFF_ROLE_ID: '1537883932497018932',
-  TICKET_CATEGORY_ID: '1537936531761930370',
-  TICKET_LOG_CHANNEL_ID: '1537937385852243968',
-  TICKET_EVAL_CHANNEL_ID: '1537936623684165652'
+  TICKETS_CATEGORY_ID: '1537936531761930370',   // categoria onde os tickets serão criados
+  STAFF_ROLE_ID: '1537883932497018932',               // cargo da equipe (pode fechar/atender)
+  EVALUATIONS_CHANNEL_ID: '1537936623684165652' // canal onde avaliações serão enviadas
 };
 
-const STAFF_ROLE_ID = CONFIG.STAFF_ROLE_ID && !CONFIG.STAFF_ROLE_ID.startsWith('COLOQUE') ? CONFIG.STAFF_ROLE_ID : process.env.STAFF_ROLE_ID;
-const TICKET_CATEGORY_ID = CONFIG.TICKET_CATEGORY_ID && !CONFIG.TICKET_CATEGORY_ID.startsWith('COLOQUE') ? CONFIG.TICKET_CATEGORY_ID : process.env.TICKET_CATEGORY_ID;
-const TICKET_LOG_CHANNEL_ID = CONFIG.TICKET_LOG_CHANNEL_ID && !CONFIG.TICKET_LOG_CHANNEL_ID.startsWith('COLOQUE') ? CONFIG.TICKET_LOG_CHANNEL_ID : process.env.TICKET_LOG_CHANNEL_ID;
-const TICKET_EVAL_CHANNEL_ID = CONFIG.TICKET_EVAL_CHANNEL_ID && !CONFIG.TICKET_EVAL_CHANNEL_ID.startsWith('COLOQUE') ? CONFIG.TICKET_EVAL_CHANNEL_ID : process.env.TICKET_EVAL_CHANNEL_ID;
+let client;
+// in-memory tickets: channelId -> { openerId, attendantId }
+const tickets = new Map();
 
-// Sessões em memória não estritamente necessárias, persisto em dataStore também
-// data.json.tickets -> { channelId: { memberId, type, attendantId, createdAt, closed, closeReason } }
-function makeTicketChannelName(type, user) {
-  const safe = user.username.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 20);
-  return `${type}-${safe}-${user.id.slice(-4)}`;
+function setup(localClient, overrides = {}) {
+  client = localClient;
+  Object.assign(CONFIG, overrides);
 }
 
-function buildTicketEmbed(member, type) {
-  return new EmbedBuilder()
-    .setTitle(type === 'suporte' ? 'Ticket de Suporte' : 'Ticket de Denúncias')
-    .setDescription(`Olá ${member}, aguarde a staff atender. Evite marcações em excesso e descreva seu problema com calma.`)
-    .addFields(
-      { name: 'Instruções', value: 'Aguarde a staff; não marque membros desnecessariamente. Use os botões abaixo para atendimento e fechamento.' },
-      { name: 'Tipo', value: `${type}`, inline: true }
-    )
-    .setColor(0x2F3136)
-    .setFooter({ text: 'Atendimento da staff' });
-}
-
-function buildTicketControls(channelId) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`ticket_attend|${channelId}`).setLabel('Atender').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`ticket_change|${channelId}`).setLabel('Trocar atendente').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`ticket_close|${channelId}`).setLabel('Fechar ticket').setStyle(ButtonStyle.Danger)
-  );
-}
-
-function buildEvalRow(ticketKey) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`ticket_rate|${ticketKey}|1`).setLabel('⭐').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`ticket_rate|${ticketKey}|2`).setLabel('⭐⭐').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`ticket_rate|${ticketKey}|3`).setLabel('⭐⭐⭐').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`ticket_rate|${ticketKey}|4`).setLabel('⭐⭐⭐⭐').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`ticket_rate|${ticketKey}|5`).setLabel('⭐⭐⭐⭐⭐').setStyle(ButtonStyle.Success)
-  );
-}
-
-// --- Interações (botões) ---
 async function handleInteraction(interaction) {
-  if (!interaction.isButton()) return;
+  try {
+    if (!interaction.isButton() && !interaction.isModalSubmit()) return false;
 
-  const customId = interaction.customId;
-  const guild = interaction.guild;
-  const user = interaction.user;
+    // Abrir ticket: ticket_open_<type>
+    if (interaction.isButton() && interaction.customId.startsWith('ticket_open_')) {
+      const type = interaction.customId.split('_').slice(2).join('_');
+      const guild = interaction.guild;
+      if (!guild) return interaction.reply({ content: 'Somente no servidor.', ephemeral: true });
 
-  // criação do ticket: customId = ticket_type|suporte OR ticket_type|denuncias
-  if (customId.startsWith('ticket_type|')) {
-    const parts = customId.split('|');
-    const type = parts[1] === 'denuncias' ? 'denuncias' : 'suporte';
+      const name = `ticket-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 90);
+      const existing = guild.channels.cache.find(c => c.name === name);
+      if (existing) return interaction.reply({ content: 'Você já tem um ticket aberto.', ephemeral: true });
 
-    // cria canal na categoria configurada
-    try {
-      const channelName = makeTicketChannelName(type, user);
-      const categoryId = TICKET_CATEGORY_ID || null;
-
-      const everyone = guild.roles.everyone;
-
-      const perms = [
-        { id: everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-        { id: user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] }
+      const overwrites = [
+        { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+        { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] }
       ];
-      if (STAFF_ROLE_ID) {
-        perms.push({ id: STAFF_ROLE_ID, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.ManageMessages] });
+      if (CONFIG.STAFF_ROLE_ID && CONFIG.STAFF_ROLE_ID !== 'COLE_AQUI_STAFF_ROLE_ID') {
+        overwrites.push({ id: CONFIG.STAFF_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
       }
 
-      const ch = await guild.channels.create({
-        name: channelName,
-        type: ChannelType.GuildText,
-        parent: categoryId || undefined,
-        permissionOverwrites: perms
+      const channel = await guild.channels.create({
+        name,
+        type: 0,
+        parent: CONFIG.TICKETS_CATEGORY_ID && CONFIG.TICKETS_CATEGORY_ID !== 'COLE_AQUI_TICKETS_CATEGORY_ID' ? CONFIG.TICKETS_CATEGORY_ID : undefined,
+        permissionOverwrites: overwrites
       });
 
-      // armazena ticket
-      const data = dataStore.load();
-      if (!data.tickets) data.tickets = {};
-      data.tickets[ch.id] = {
-        memberId: user.id,
-        type,
-        attendantId: null,
-        createdAt: new Date().toISOString(),
-        closed: false,
-        closeReason: null
-      };
-      dataStore.save(data);
+      const atenderBtn = new ButtonBuilder().setCustomId(`ticket_atender_${channel.id}`).setLabel('Atender').setStyle(ButtonStyle.Success);
+      const trocarBtn = new ButtonBuilder().setCustomId(`ticket_trocar_${channel.id}`).setLabel('Trocar atendente').setStyle(ButtonStyle.Primary);
+      const fecharBtn = new ButtonBuilder().setCustomId(`ticket_fechar_${channel.id}`).setLabel('Fechar ticket').setStyle(ButtonStyle.Danger);
 
-      // envia mensagem inicial no canal do ticket (marca staff)
-      const mentionStaff = STAFF_ROLE_ID ? `<@&${STAFF_ROLE_ID}>` : 'staff';
-      const embed = buildTicketEmbed(`<@${user.id}>`, type);
-      const controls = buildTicketControls(ch.id);
-      await ch.send({ content: `${mentionStaff}`, embeds: [embed], components: [controls] });
+      await channel.send({ content: `<@${interaction.user.id}>`, embeds: [ new EmbedBuilder().setTitle('Ticket Aberto').setDescription(`Tipo: ${type}`).setColor('#5865F2') ], components: [ new ActionRowBuilder().addComponents(atenderBtn, trocarBtn, fecharBtn) ] });
 
-      // confirma para o usuário (ephemeral)
-      return interaction.reply({ content: `✅ Ticket criado: ${ch}`, ephemeral: true });
-    } catch (err) {
-      console.error('Erro ao criar ticket:', err);
-      return interaction.reply({ content: '❌ Erro ao criar ticket. Verifique permissões do bot.', ephemeral: true });
-    }
-  }
-
-  // Atender: apenas staff deve poder atender
-  if (customId.startsWith('ticket_attend|')) {
-    const chId = customId.split('|')[1];
-    const data = dataStore.load();
-    const ticket = data.tickets?.[chId];
-    if (!ticket) return interaction.reply({ content: 'Ticket não encontrado (possivelmente removido).', ephemeral: true });
-
-    // permissões: apenas quem tem staff role pode atender
-    const member = interaction.member;
-    if (STAFF_ROLE_ID && !member.roles.cache.has(STAFF_ROLE_ID)) {
-      return interaction.reply({ content: 'Apenas staff pode atender tickets.', ephemeral: true });
+      tickets.set(channel.id, { openerId: interaction.user.id, attendantId: null });
+      await interaction.reply({ content: `Ticket criado: ${channel}`, ephemeral: true });
+      return true;
     }
 
-    if (ticket.attendantId && ticket.attendantId === user.id) {
-      return interaction.reply({ content: 'Você já está atendendo este ticket.', ephemeral: true });
+    // Atender / Trocar / Fechar
+    if (interaction.isButton() && (interaction.customId.startsWith('ticket_atender_') || interaction.customId.startsWith('ticket_trocar_') || interaction.customId.startsWith('ticket_fechar_'))) {
+      const parts = interaction.customId.split('_');
+      const action = parts[1];
+      const channelId = parts.slice(2).join('_');
+      const ticket = tickets.get(channelId);
+      if (!ticket) return interaction.reply({ content: 'Ticket não encontrado.', ephemeral: true });
+
+      // somente staff pode executar
+      if (!interaction.member.roles.cache.has(CONFIG.STAFF_ROLE_ID) && !interaction.member.permissions.has('ManageGuild')) {
+        return interaction.reply({ content: 'Somente staff pode executar esta ação.', ephemeral: true });
+      }
+
+      if (action === 'atender') {
+        if (ticket.attendantId) return interaction.reply({ content: 'Este ticket já possui atendente.', ephemeral: true });
+        ticket.attendantId = interaction.user.id;
+        tickets.set(channelId, ticket);
+        const ch = await client.channels.fetch(channelId);
+        await ch.send(`Atendimento iniciado por <@${interaction.user.id}>`);
+        return interaction.reply({ content: 'Você iniciou o atendimento.', ephemeral: true });
+      }
+
+      if (action === 'trocar') {
+        ticket.attendantId = interaction.user.id;
+        tickets.set(channelId, ticket);
+        const ch = await client.channels.fetch(channelId);
+        await ch.send(`Atendimento agora por <@${interaction.user.id}>`);
+        return interaction.reply({ content: 'Atendente alterado.', ephemeral: true });
+      }
+
+      if (action === 'fechar') {
+        if (!ticket.attendantId) return interaction.reply({ content: 'Só é possível fechar com um atendente atribuído.', ephemeral: true });
+        // abrir modal para motivo
+        const modal = new ModalBuilder().setCustomId(`ticket_close_modal|${channelId}`).setTitle('Fechar Ticket - Motivo');
+        const motivo = new TextInputBuilder().setCustomId('close_reason').setLabel('Motivo do fechamento').setStyle(TextInputStyle.Paragraph).setRequired(true);
+        modal.addComponents(new ActionRowBuilder().addComponents(motivo));
+        await interaction.showModal(modal);
+        return true;
+      }
     }
 
-    // define atendente
-    ticket.attendantId = user.id;
-    data.tickets[chId] = ticket;
-    dataStore.save(data);
+    // Modal submit para fechamento
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_close_modal|')) {
+      const channelId = interaction.customId.split('|')[1];
+      const ticket = tickets.get(channelId);
+      if (!ticket) return interaction.reply({ content: 'Ticket não encontrado.', ephemeral: true });
 
-    // notifica no canal
-    const ch = await interaction.guild.channels.fetch(chId).catch(() => null);
-    if (ch) {
-      await ch.send({ content: `🟢 <@${user.id}> está atendendo este ticket.` });
-    }
+      const reason = interaction.fields.getTextInputValue('close_reason');
+      await interaction.reply({ content: 'Fechando ticket em 20 segundos...', ephemeral: true });
 
-    return interaction.reply({ content: 'Você agora está atendendo este ticket.', ephemeral: true });
-  }
-
-  // Trocar atendente: qualquer staff que clicar se torna o atendente
-  if (customId.startsWith('ticket_change|')) {
-    const chId = customId.split('|')[1];
-    const data = dataStore.load();
-    const ticket = data.tickets?.[chId];
-    if (!ticket) return interaction.reply({ content: 'Ticket não encontrado.', ephemeral: true });
-
-    const member = interaction.member;
-    if (STAFF_ROLE_ID && !member.roles.cache.has(STAFF_ROLE_ID)) {
-      return interaction.reply({ content: 'Apenas staff pode trocar atendente.', ephemeral: true });
-    }
-
-    ticket.attendantId = user.id;
-    data.tickets[chId] = ticket;
-    dataStore.save(data);
-
-    const ch = await interaction.guild.channels.fetch(chId).catch(() => null);
-    if (ch) await ch.send({ content: `🔁 Atendente trocado: agora <@${user.id}> está no atendimento.` });
-
-    return interaction.reply({ content: 'Você agora é o atendente deste ticket.', ephemeral: true });
-  }
-
-  // Fechar ticket: só pode fechar se houver um atendente (e quem clicar deve ser staff)
-  if (customId.startsWith('ticket_close|')) {
-    const chId = customId.split('|')[1];
-    const data = dataStore.load();
-    const ticket = data.tickets?.[chId];
-    if (!ticket) return interaction.reply({ content: 'Ticket não encontrado.', ephemeral: true });
-
-    const member = interaction.member;
-    if (STAFF_ROLE_ID && !member.roles.cache.has(STAFF_ROLE_ID)) {
-      return interaction.reply({ content: 'Apenas staff pode fechar tickets.', ephemeral: true });
-    }
-
-    if (!ticket.attendantId) {
-      return interaction.reply({ content: 'O ticket só pode ser fechado quando houver um atendente.' , ephemeral: true});
-    }
-
-    // show modal para motivo
-    const modal = new ModalBuilder()
-      .setCustomId(`ticket_close_modal|${chId}`)
-      .setTitle('Fechar Ticket - Motivo');
-
-    const reasonInput = new TextInputBuilder()
-      .setCustomId('close_reason')
-      .setLabel('Motivo do fechamento')
-      .setStyle(TextInputStyle.Paragraph)
-      .setRequired(true)
-      .setPlaceholder('Descreva o motivo do fechamento...');
-
-    modal.addComponents(new ActionRowBuilder().addComponents(reasonInput));
-    await interaction.showModal(modal);
-    return;
-  }
-
-  // Avaliação: botão de 1-5 vindo do DM do usuário (ou canal), customId ticket_rate|ticketKey|rating
-  if (customId.startsWith('ticket_rate|')) {
-    const parts = customId.split('|');
-    const ticketKey = parts[1]; // normalmente channelId ou outra key
-    const rating = parts[2];
-    const data = dataStore.load();
-    const ticket = data.tickets?.[ticketKey];
-
-    // reply ephemerally (ou confirm in DM)
-    await interaction.reply({ content: `Obrigado pela avaliação de ${rating} estrela(s)!`, ephemeral: true });
-
-    // envia para canal de avaliação (se configurado)
-    if (TICKET_EVAL_CHANNEL_ID) {
-      const guild = interaction.guild || (await interaction.client.guilds.fetch(Object.keys(interaction.client.guilds.cache)[0]).catch(() => null));
-      const evalCh = guild ? await guild.channels.fetch(TICKET_EVAL_CHANNEL_ID).catch(() => null) : null;
-      const embed = new EmbedBuilder()
-        .setTitle('Nova Avaliação de Ticket')
-        .addFields(
-          { name: 'Ticket', value: ticketKey || 'N/A', inline: true },
-          { name: 'Avaliação', value: `${rating} estrela(s)`, inline: true },
-          { name: 'Usuário', value: `<@${interaction.user.id}>`, inline: true },
-          { name: 'Atendente', value: ticket?.attendantId ? `<@${ticket.attendantId}>` : 'N/A', inline: true }
-        )
-        .setColor(0xFFD166)
-        .setTimestamp();
-
-      if (evalCh) await evalCh.send({ embeds: [embed] }).catch(() => null);
-    }
-
-    // marca no ticket (persist)
-    if (ticket) {
-      ticket.evaluation = { rating: Number(rating), by: interaction.user.id, at: new Date().toISOString() };
-      data.tickets[ticketKey] = ticket;
-      dataStore.save(data);
-    }
-
-    return;
-  }
-
-  // qualquer outro botão não tratado
-  return;
-}
-
-// --- Modal submit handler (quando staff submete o motivo) ---
-async function handleModalSubmit(interaction) {
-  if (!interaction.isModalSubmit()) return;
-
-  const customId = interaction.customId;
-  if (!customId.startsWith('ticket_close_modal|')) return;
-
-  const chId = customId.split('|')[1];
-  const reason = interaction.fields.getTextInputValue('close_reason');
-
-  const data = dataStore.load();
-  const ticket = data.tickets?.[chId];
-  if (!ticket) {
-    await interaction.reply({ content: 'Ticket não encontrado (ao tentar fechar).', ephemeral: true });
-    return;
-  }
-
-  // marca como fechado e salva motivo
-  ticket.closed = true;
-  ticket.closeReason = reason;
-  ticket.closedAt = new Date().toISOString();
-  data.tickets[chId] = ticket;
-  dataStore.save(data);
-
-  // tranca canal: remove perm do membro (para que não envie mais)
-  try {
-    const channel = await interaction.guild.channels.fetch(chId);
-    if (channel) {
-      await channel.permissionOverwrites.create(ticket.memberId, { ViewChannel: false, SendMessages: false }).catch(() => null);
-      // opcional: renomeia canal
-      await channel.setName(`closed-${channel.name}`).catch(() => null);
-
-      // notifica canal sobre fechamento com motivo e atendente
-      const embed = new EmbedBuilder()
-        .setTitle('Ticket fechado')
-        .setDescription(`Fechado por <@${interaction.user.id}>`)
-        .addFields(
-          { name: 'Atendente', value: ticket.attendantId ? `<@${ticket.attendantId}>` : 'N/A', inline: true },
-          { name: 'Motivo', value: reason || 'Sem motivo informado', inline: false }
-        )
-        .setColor(0xED4245)
-        .setTimestamp();
-      await channel.send({ embeds: [embed] });
-
-      // Lógica: enviar DM para o membro solicitando avaliação (bot envia DM com botões 1-5)
       try {
-        const dm = await interaction.client.users.fetch(ticket.memberId);
-        const prompt = await dm.send({
-          content: `Seu ticket (${ticket.type}) foi fechado. Por favor avalie o atendimento:`,
-          components: [buildEvalRow(chId)]
-        });
-      } catch (e) {
-        // não consegue DM, registra no log do servidor
-        console.warn('Não foi possível enviar DM para o usuário com avaliação:', e?.message || e);
-      }
+        const ch = await client.channels.fetch(channelId);
+        await ch.send(`Ticket será fechado por ${interaction.user.tag}. Motivo: ${reason}\nFechando em 20s...`);
+      } catch (err) { console.error('Erro notificar canal antes de fechar', err); }
 
-      // envia log para canal de logs se configurado
-      if (TICKET_LOG_CHANNEL_ID) {
-        const logCh = await interaction.guild.channels.fetch(TICKET_LOG_CHANNEL_ID).catch(() => null);
-        if (logCh) {
-          const logEmbed = new EmbedBuilder()
-            .setTitle('Log de Fechamento de Ticket')
-            .addFields(
-              { name: 'Ticket', value: chId, inline: true },
-              { name: 'Tipo', value: ticket.type || 'N/A', inline: true },
-              { name: 'Membro', value: `<@${ticket.memberId}>`, inline: true },
-              { name: 'Atendente', value: ticket.attendantId ? `<@${ticket.attendantId}>` : 'N/A', inline: true },
-              { name: 'Motivo', value: reason || 'Sem motivo informado', inline: false }
-            )
-            .setColor(0x5865F2)
-            .setTimestamp();
-          await logCh.send({ embeds: [logEmbed] }).catch(() => null);
+      // aguarda 20s, pede avaliação por DM ao opener, deleta canal e envia avaliação ao canal configurado quando recebido
+      setTimeout(async () => {
+        try {
+          const t = tickets.get(channelId);
+          if (!t) return;
+          // envia DM com botões de rating
+          try {
+            const opener = await client.users.fetch(t.openerId);
+            const row = new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId(`rate_${channelId}_1`).setLabel('⭐').setStyle(ButtonStyle.Secondary),
+              new ButtonBuilder().setCustomId(`rate_${channelId}_2`).setLabel('⭐⭐').setStyle(ButtonStyle.Secondary),
+              new ButtonBuilder().setCustomId(`rate_${channelId}_3`).setLabel('⭐⭐⭐').setStyle(ButtonStyle.Secondary),
+              new ButtonBuilder().setCustomId(`rate_${channelId}_4`).setLabel('⭐⭐⭐⭐').setStyle(ButtonStyle.Secondary),
+              new ButtonBuilder().setCustomId(`rate_${channelId}_5`).setLabel('⭐⭐⭐⭐⭐').setStyle(ButtonStyle.Secondary)
+            );
+            await opener.send({ content: 'Seu ticket foi fechado. Avalie o atendimento:', components: [row] }).catch(()=>{});
+          } catch (err) { console.error('Erro ao DM opener para rating', err); }
+
+          // deleta canal
+          try {
+            const ch = await client.channels.fetch(channelId);
+            await ch.delete('Ticket fechado e removido pelo bot');
+          } catch (err) { console.error('Erro ao deletar canal', err); }
+
+          tickets.delete(channelId);
+        } catch (err) {
+          console.error('Erro no timeout de fechar ticket', err);
         }
-      }
+      }, 20000);
 
-      await interaction.reply({ content: 'Ticket fechado com sucesso e usuário solicitado a avaliar.', ephemeral: true });
-      return;
+      return true;
     }
+
+    // Rating buttons: rate_<channelId>_<1..5>
+    if (interaction.isButton() && interaction.customId.startsWith('rate_')) {
+      const [, channelId, stars] = interaction.customId.split('_');
+      const rating = Number(stars);
+      await interaction.reply({ content: `Obrigado pela avaliação: ${rating} estrela(s).`, ephemeral: true });
+
+      // enviar embed para canal de avaliações
+      try {
+        if (CONFIG.EVALUATIONS_CHANNEL_ID && CONFIG.EVALUATIONS_CHANNEL_ID !== 'COLE_AQUI_EVALUATIONS_CHANNEL_ID') {
+          const ch = await client.channels.fetch(CONFIG.EVALUATIONS_CHANNEL_ID);
+          if (ch) {
+            const embed = new EmbedBuilder()
+              .setTitle('Avaliação de Atendimento')
+              .addFields(
+                { name: 'Ticket', value: channelId, inline: true },
+                { name: 'Avaliação', value: `${'⭐'.repeat(rating)} (${rating}/5)`, inline: true },
+                { name: 'Usuário', value: `${interaction.user.tag} (${interaction.user.id})`, inline: false }
+              )
+              .setColor('#f1c40f')
+              .setTimestamp();
+            await ch.send({ embeds: [embed] });
+          }
+        }
+      } catch (err) { console.error('Erro ao enviar avaliação para canal', err); }
+
+      return true;
+    }
+
+    return false;
   } catch (err) {
-    console.error('Erro ao finalizar ticket:', err);
-    await interaction.reply({ content: 'Erro ao finalizar ticket (verifique permissões).', ephemeral: true });
-    return;
+    console.error('ticket_botoes error', err);
+    try { if (!interaction.replied) await interaction.reply({ content: 'Erro interno no sistema de tickets.', ephemeral: true }); } catch {}
+    return false;
   }
 }
 
-module.exports = { handleInteraction, handleModalSubmit };
+module.exports = { setup, handleInteraction, CONFIG };

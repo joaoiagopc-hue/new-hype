@@ -1,141 +1,202 @@
-/* commands/admin/wl_botoes.js */
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
-const dataStore = require('../../dataStore');
+// wl_botoes.js
+// Quiz de WL + aplicação/removal de cargos conforme a sua estrutura.
+// CONFIG no topo — cole os IDs do Discord aqui.
 
-/*
-  CONFIG - cole os IDs dos cargos aqui (ou use .env)
-  - ROLE_FROM_ID: cargo que o usuário recebeu ao pegar o ID (será REMOVIDO ao passar)
-  - ROLE_UNREGISTERED_ID: cargo de não-registrado (será REMOVIDO ao passar)
-  - ROLE_REGISTERED_ID: cargo final (será ADICIONADO ao passar)
-  - WL_QUESTIONS e WL_PASS_MIN podem ser ajustados aqui ou via .env
-*/
+const fs = require('fs');
+const path = require('path');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+
 const CONFIG = {
-  ROLE_FROM_ID: '1537933883788763177',
-  ROLE_UNREGISTERED_ID: '1537876556322570461',
-  ROLE_REGISTERED_ID: '1537843709284982805',
-  WL_QUESTIONS: 7,
-  WL_PASS_MIN: 4
+  DATA_FILE: path.join(__dirname, 'data.json'),
+  WL_ROLE_ID: '1537933883788763177',           // cargo "com id" -> será REMOVIDO se passar no quiz
+  ROLE_NO_REG_ID: '1537876556322570461',   // cargo "sem registro" -> será REMOVIDO se passar no quiz
+  REGISTERED_ROLE_ID: '1537843709284982805', // cargo "registrado" -> será ADICIONADO se passar
+  STAFF_CHANNEL_ID: '1537883932497018932',    // canal para notificar aprovações (opcional)
+  PASSING_SCORE: 4                              // acertos mínimos para passar
 };
 
-const ROLE_FROM_ID = CONFIG.ROLE_FROM_ID && !CONFIG.ROLE_FROM_ID.startsWith('COLOQUE') ? CONFIG.ROLE_FROM_ID : process.env.ID_ROLE_ID;
-const ROLE_UNREGISTERED_ID = CONFIG.ROLE_UNREGISTERED_ID && !CONFIG.ROLE_UNREGISTERED_ID.startsWith('COLOQUE') ? CONFIG.ROLE_UNREGISTERED_ID : process.env.ROLE_UNREGISTERED_ID;
-const ROLE_REGISTERED_ID = CONFIG.ROLE_REGISTERED_ID && !CONFIG.ROLE_REGISTERED_ID.startsWith('COLOQUE') ? CONFIG.ROLE_REGISTERED_ID : process.env.ROLE_REGISTERED_ID;
-const TOTAL_QUESTIONS = Number(CONFIG.WL_QUESTIONS || process.env.WL_QUESTIONS || 7);
-const PASS_MIN = Number(CONFIG.WL_PASS_MIN || process.env.WL_PASS_MIN || 4);
+let client;
 
-// perguntas (edite como quiser)
-const QUESTIONS = [
-  { question: 'Qual é o comportamento esperado no RP ao entrar em um local privado?', choices: ['A) Entrar e mexer em tudo', 'B) Pedir permissão/seguir regras', 'C) Invadir e roubar', 'D) Ignorar players'], answer: 'B' },
-  { question: 'O que fazer se você encontrar um bug que quebra o RP?', choices: ['A) Explorar e abusar', 'B) Ignorar', 'C) Reportar para staff', 'D) Compartilhar publicamente'], answer: 'C' },
-  { question: 'Ao ser preso no RP, você deve:', choices: ['A) Pedir for spawn', 'B) Continuar a agir fora do RP', 'C) Seguir a situação e cooperar', 'D) Abusar do chat'], answer: 'C' },
-  { question: 'Qual destas atitudes é aceitável durante RP?', choices: ['A) Metagaming', 'B) Powergaming', 'C) Respeitar limites e contexto', 'D) Trolling'], answer: 'C' },
-  { question: 'Se alguém pede para parar uma cena RP, você deve:', choices: ['A) Continuar', 'B) Respeitar e parar', 'C) Ignorar', 'D) Ri e gravar'], answer: 'B' },
-  { question: 'O uso de scripts externos que dão vantagem é:', choices: ['A) Permitido', 'B) Obrigatório', 'C) Proibido', 'D) Opcional'], answer: 'C' },
-  { question: 'Ao ver um conflito entre players, a melhor atitude é:', choices: ['A) Agravar', 'B) Reportar para staff se necessário', 'C) Usar exploits', 'D) Gravar sem avisar'], answer: 'B' }
+const QUIZ_QUESTIONS = [
+  { q: 'Qual atitude NÃO é aceitável durante um roleplay?', choices: { A: 'Respeitar limites', B: 'Metagaming', C: 'Agir no personagem', D: 'Seguir as regras' }, correct: 'B' },
+  { q: 'O que é powergaming?', choices: { A: 'Interpretar com criatividade', B: 'Forçar ações impossíveis sobre outros', C: 'Ajudar aliados', D: 'Reportar bugs' }, correct: 'B' },
+  { q: 'Onde estão as regras de RP do servidor?', choices: { A: 'Canal #regras', B: 'DMs aleatórias', C: 'Dentro do nick', D: 'Sites externos' }, correct: 'A' },
+  { q: 'Se alguém te ferir no RP sem aviso, você deve:', choices: { A: 'Vingar no jogo', B: 'Sair e não reportar', C: 'Reportar ao staff com evidências', D: 'Divulgar no chat' }, correct: 'C' },
+  { q: 'Quantas tentativas imediatas é recomendado?', choices: { A: 'Ilimitado', B: 'Pode haver espera / staff avalia', C: 'Nunca', D: 'Uma vez' }, correct: 'B' },
+  { q: 'O que evita conflitos reais no RP?', choices: { A: 'Separar player do personagem', B: 'Confundir real com RP', C: 'Trolar', D: 'Vazar dados' }, correct: 'A' },
+  { q: 'Conduta esperada de um whitelistado?', choices: { A: 'Trolar', B: 'Ser tóxico', C: 'Respeitar e ajudar', D: 'Vender contas' }, correct: 'C' }
 ];
 
-// sessões em memória: userId -> { index, correct }
-const sessions = new Map();
+const quizSessions = new Map();
+const userSession = new Map();
 
-function buildQuestionEmbed(userId, idx) {
-  const q = QUESTIONS[idx];
-  return new EmbedBuilder()
-    .setTitle(`Pergunta ${idx + 1} / ${TOTAL_QUESTIONS}`)
-    .setDescription(q.question)
-    .addFields(
-      { name: 'A', value: q.choices[0], inline: false },
-      { name: 'B', value: q.choices[1], inline: false },
-      { name: 'C', value: q.choices[2], inline: false },
-      { name: 'D', value: q.choices[3], inline: false }
-    )
-    .setColor(0x2F3136)
-    .setFooter({ text: `Respondendo como: ${userId}` });
+function setup(localClient, overrides = {}) {
+  client = localClient;
+  // permitir sobrescrever CONFIG via setup se desejar
+  Object.assign(CONFIG, overrides);
+  if (overrides.DATA_FILE) CONFIG.DATA_FILE = overrides.DATA_FILE;
 }
 
-function buildAnswerRow(userId, idx) {
-  const base = `wl_answer|${userId}|${idx}|`;
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(base + 'A').setLabel('A').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(base + 'B').setLabel('B').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(base + 'C').setLabel('C').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(base + 'D').setLabel('D').setStyle(ButtonStyle.Primary)
-  );
+function loadData() {
+  if (!fs.existsSync(CONFIG.DATA_FILE)) {
+    fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify({ nextId: 10, applications: {}, ids: {} }, null, 2));
+  }
+  const raw = fs.readFileSync(CONFIG.DATA_FILE, 'utf8') || '{}';
+  try { return JSON.parse(raw); } catch { return { nextId: 10, applications: {}, ids: {} }; }
 }
+function saveData(data) { fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(data, null, 2)); }
 
 async function handleInteraction(interaction) {
-  if (!interaction.isButton()) return;
-  const { customId, user, guild } = interaction;
-
-  if (customId === 'wl_start') {
-    if (sessions.has(user.id)) {
-      return interaction.reply({ content: 'Você já tem uma sessão em andamento.', ephemeral: true });
-    }
-    const session = { index: 0, correct: 0 };
-    sessions.set(user.id, session);
-    await interaction.reply({ content: 'Quiz iniciado! As perguntas serão enviadas no canal.', ephemeral: true });
-
-    const qEmbed = buildQuestionEmbed(user.id, 0);
-    const qRow = buildAnswerRow(user.id, 0);
-    return interaction.channel.send({ content: `${user}`, embeds: [qEmbed], components: [qRow] });
-  }
-
-  if (customId.startsWith('wl_answer|')) {
-    const parts = customId.split('|');
-    const targetUser = parts[1];
-    const idx = Number(parts[2]);
-    const choice = parts[3];
-
-    if (user.id !== targetUser) {
-      return interaction.reply({ content: 'Este quiz não é seu — clique apenas nas suas opções.', ephemeral: true });
-    }
-
-    const session = sessions.get(user.id);
-    if (!session) return interaction.reply({ content: 'Sessão não encontrada. Use !painel-wl para iniciar.', ephemeral: true });
-    if (idx !== session.index) return interaction.reply({ content: 'Esta pergunta já foi respondida ou não é a atual.', ephemeral: true });
-
-    const correctAnswer = QUESTIONS[idx].answer;
-    const isCorrect = choice === correctAnswer;
-    if (isCorrect) session.correct += 1;
-    await interaction.reply({ content: isCorrect ? '✅ Correto!' : `❌ Incorreto. Resposta certa: ${correctAnswer}`, ephemeral: true });
-
-    session.index += 1;
-
-    if (session.index >= TOTAL_QUESTIONS) {
-      const score = session.correct;
-      const passed = score >= PASS_MIN;
-
-      const data = dataStore.load();
-      if (!data.users) data.users = {};
-      if (!data.users[user.id]) data.users[user.id] = {};
-      data.users[user.id].whitelist = { passed, score, timestamp: new Date().toISOString() };
-      dataStore.save(data);
-
-      if (passed && guild) {
-        try {
-          const member = await guild.members.fetch(user.id);
-          if (ROLE_FROM_ID) { try { await member.roles.remove(ROLE_FROM_ID); } catch (e) { console.warn('Remover ROLE_FROM_ID falhou:', e.message || e); } }
-          if (ROLE_UNREGISTERED_ID) { try { await member.roles.remove(ROLE_UNREGISTERED_ID); } catch (e) { console.warn('Remover ROLE_UNREGISTERED_ID falhou:', e.message || e); } }
-          if (ROLE_REGISTERED_ID) { try { await member.roles.add(ROLE_REGISTERED_ID); } catch (e) { console.warn('Adicionar ROLE_REGISTERED_ID falhou:', e.message || e); } }
-        } catch (e) {
-          console.warn('Falha ao processar roles WL:', e.message || e);
-        }
+  try {
+    // inicia o quiz (botão do painel)
+    if (interaction.isButton() && interaction.customId === 'wl_iniciar') {
+      if (userSession.has(interaction.user.id)) {
+        return interaction.reply({ content: 'Você já tem um quiz em andamento.', ephemeral: true });
       }
-
-      sessions.delete(user.id);
-
-      const resultEmbed = new EmbedBuilder()
-        .setTitle(passed ? 'Whitelist Aprovada ✅' : 'Whitelist Reprovada ❌')
-        .setDescription(`Você acertou **${score}** de **${TOTAL_QUESTIONS}** perguntas.`)
-        .setColor(passed ? 0x57F287 : 0xED4245);
-
-      return interaction.channel.send({ content: `${user}`, embeds: [resultEmbed] });
-    } else {
-      const nextIdx = session.index;
-      const qEmbed = buildQuestionEmbed(user.id, nextIdx);
-      const qRow = buildAnswerRow(user.id, nextIdx);
-      return interaction.channel.send({ content: `${user}`, embeds: [qEmbed], components: [qRow] });
+      const sessionId = Date.now().toString();
+      quizSessions.set(sessionId, { userId: interaction.user.id, qIndex: 0, correctCount: 0 });
+      userSession.set(interaction.user.id, sessionId);
+      return await sendQuestion(interaction, sessionId);
     }
+
+    // respostas do quiz: quiz|<sessionId>|<choice>
+    if (interaction.isButton() && interaction.customId.startsWith('quiz|')) {
+      const [, sessionId, choice] = interaction.customId.split('|');
+      const session = quizSessions.get(sessionId);
+      if (!session) return interaction.reply({ content: 'Sessão inválida/expirada.', ephemeral: true });
+      if (interaction.user.id !== session.userId) return interaction.reply({ content: 'Este quiz não é seu.', ephemeral: true });
+
+      const qObj = QUIZ_QUESTIONS[session.qIndex];
+      if (choice === qObj.correct) session.correctCount++;
+      session.qIndex++;
+
+      if (session.qIndex < QUIZ_QUESTIONS.length) return await sendQuestion(interaction, sessionId);
+
+      // terminou
+      const score = session.correctCount;
+      const passed = score >= (CONFIG.PASSING_SCORE || 4);
+      quizSessions.delete(sessionId);
+      userSession.delete(interaction.user.id);
+
+      if (passed) {
+        await processPass(interaction, score);
+      } else {
+        await processFail(interaction, score);
+      }
+      return true;
+    }
+
+    return false;
+  } catch (err) {
+    console.error('wl_botoes error', err);
+    try { if (!interaction.replied) await interaction.reply({ content: 'Erro interno no quiz.', ephemeral: true }); } catch {}
+    return false;
   }
 }
 
-module.exports = { handleInteraction };
+async function processPass(interaction, score) {
+  try {
+    const guild = interaction.guild;
+    const member = await guild.members.fetch(interaction.user.id);
+
+    // remove cargo com id
+    if (CONFIG.WL_ROLE_ID && CONFIG.WL_ROLE_ID !== 'COLE_AQUI_WL_ROLE_ID') {
+      try { if (member.roles.cache.has(CONFIG.WL_ROLE_ID)) await member.roles.remove(CONFIG.WL_ROLE_ID, 'Passou na WL - remover cargo com id'); } catch(e){ console.error('remove WL_ROLE', e); }
+    }
+    // remove cargo sem registro
+    if (CONFIG.ROLE_NO_REG_ID && CONFIG.ROLE_NO_REG_ID !== 'COLE_AQUI_ROLE_NO_REG_ID') {
+      try { if (member.roles.cache.has(CONFIG.ROLE_NO_REG_ID)) await member.roles.remove(CONFIG.ROLE_NO_REG_ID, 'Passou na WL - remover cargo sem registro'); } catch(e){ console.error('remove NO_REG', e); }
+    }
+    // adiciona registrado
+    if (CONFIG.REGISTERED_ROLE_ID && CONFIG.REGISTERED_ROLE_ID !== 'COLE_AQUI_REGISTERED_ROLE_ID') {
+      try { await member.roles.add(CONFIG.REGISTERED_ROLE_ID, 'Passou na WL - adicionar cargo registrado'); } catch(e){ console.error('add REGISTERED', e); }
+    }
+
+    // salva histórico
+    const data = loadData();
+    const appId = Date.now().toString();
+    data.applications = data.applications || {};
+    data.applications[appId] = {
+      applicantId: interaction.user.id,
+      declaredNick: member.user.username,
+      motivo: `Quiz aprovado ${score}/${QUIZ_QUESTIONS.length}`,
+      status: 'approved-by-quiz',
+      quizScore: score,
+      createdAt: new Date().toISOString()
+    };
+    saveData(data);
+
+    // DM de confirmação
+    try { await interaction.user.send(`Parabéns! Você foi aprovado na WL com ${score}/${QUIZ_QUESTIONS.length}. Você recebeu o cargo de registrado.`).catch(()=>{}); } catch {}
+
+    // notificar staff
+    try {
+      if (CONFIG.STAFF_CHANNEL_ID && CONFIG.STAFF_CHANNEL_ID !== 'COLE_AQUI_STAFF_CHANNEL_ID') {
+        const ch = await interaction.guild.channels.fetch(CONFIG.STAFF_CHANNEL_ID);
+        if (ch) {
+          await ch.send({ embeds: [ new EmbedBuilder().setTitle('WL - Usuário Aprovado').setDescription(`${interaction.user.tag} passou no quiz (${score}/${QUIZ_QUESTIONS.length})`).setColor('#2ecc71') ] }).catch(()=>{});
+        }
+      }
+    } catch (err) { console.error('notify staff', err); }
+
+    // resposta ao usuário
+    try {
+      await interaction.update({
+        embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Aprovado — ${score}/${QUIZ_QUESTIONS.length}`).setColor('#2ecc71') ],
+        components: []
+      });
+    } catch {
+      await interaction.reply({ embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Aprovado — ${score}/${QUIZ_QUESTIONS.length}`).setColor('#2ecc71') ], ephemeral: true });
+    }
+  } catch (err) {
+    console.error('processPass error', err);
+    try { await interaction.reply({ content: 'Erro ao processar aprovação.', ephemeral: true }); } catch {}
+  }
+}
+
+async function processFail(interaction, score) {
+  try {
+    try { await interaction.user.send(`Você acertou ${score}/${QUIZ_QUESTIONS.length}. Não atingiu o mínimo de ${CONFIG.PASSING_SCORE || 4}. Tente novamente mais tarde.`).catch(()=>{}); } catch {}
+    try {
+      await interaction.update({
+        embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Reprovado — ${score}/${QUIZ_QUESTIONS.length}. Necessário ${CONFIG.PASSING_SCORE || 4}.`).setColor('#e74c3c') ],
+        components: []
+      });
+    } catch {
+      await interaction.reply({ embeds: [ new EmbedBuilder().setTitle('Resultado').setDescription(`Reprovado — ${score}/${QUIZ_QUESTIONS.length}. Necessário ${CONFIG.PASSING_SCORE || 4}.`).setColor('#e74c3c') ], ephemeral: true });
+    }
+  } catch (err) {
+    console.error('processFail error', err);
+  }
+}
+
+async function sendQuestion(interaction, sessionId) {
+  const session = quizSessions.get(sessionId);
+  if (!session) throw new Error('session not found');
+  const qObj = QUIZ_QUESTIONS[session.qIndex];
+
+  const embed = new EmbedBuilder()
+    .setTitle(`Pergunta ${session.qIndex + 1}/${QUIZ_QUESTIONS.length}`)
+    .setDescription(qObj.q)
+    .setColor('#ffb86b')
+    .addFields(
+      { name: 'A', value: qObj.choices.A, inline: true },
+      { name: 'B', value: qObj.choices.B, inline: true },
+      { name: 'C', value: qObj.choices.C, inline: true },
+      { name: 'D', value: qObj.choices.D, inline: true }
+    );
+
+  const a = new ButtonBuilder().setCustomId(`quiz|${sessionId}|A`).setLabel('A').setStyle(ButtonStyle.Primary);
+  const b = new ButtonBuilder().setCustomId(`quiz|${sessionId}|B`).setLabel('B').setStyle(ButtonStyle.Primary);
+  const c = new ButtonBuilder().setCustomId(`quiz|${sessionId}|C`).setLabel('C').setStyle(ButtonStyle.Primary);
+  const d = new ButtonBuilder().setCustomId(`quiz|${sessionId}|D`).setLabel('D').setStyle(ButtonStyle.Primary);
+  const row = new ActionRowBuilder().addComponents(a, b, c, d);
+
+  try {
+    await interaction.update({ embeds: [embed], components: [row], ephemeral: true });
+  } catch (err) {
+    try { await interaction.reply({ embeds: [embed], components: [row], ephemeral: true }); } catch (e) { console.error('Erro ao enviar pergunta:', e); }
+  }
+}
+
+module.exports = { setup, handleInteraction, CONFIG };

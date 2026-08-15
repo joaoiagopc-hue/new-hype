@@ -1,59 +1,75 @@
-/* commands/rp/id.js */
-require('dotenv').config();
-const dataStore = require('../../dataStore');
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+// id.js
+// Comando !id — atribui/retorna ID (a partir de nextId em data.json) e atualiza nickname para "ID | user".
+// EDITE o bloco CONFIG abaixo com os IDs se quiser (WL_ROLE_ID opcional).
 
-/*
-  CONFIG - cole os IDs aqui (ou use .env)
-  ID_ROLE_ID: cargo a ser adicionado quando o usuário pegar o ID
-  START_ID: número inicial do ID (ex: 10)
-*/
+const fs = require('fs');
+const path = require('path');
+
 const CONFIG = {
-  ID_ROLE_ID: '1537933883788763177',
-  START_ID: 10
+  DATA_FILE: path.join(__dirname, 'data.json'),
+  WL_ROLE_ID: '1537933883788763177' // opcional: cargo "com id" que será aplicado quando atribuir ID
 };
 
-const ID_ROLE_ID = CONFIG.ID_ROLE_ID && !CONFIG.ID_ROLE_ID.startsWith('COLOQUE') ? CONFIG.ID_ROLE_ID : process.env.ID_ROLE_ID;
-const START_ID = Number(CONFIG.START_ID || process.env.START_ID || 10);
+let client;
 
-async function handleIdCommand(message) {
-  if (message.author.bot) return;
-  if (!message.guild) return message.reply('Comando só pode ser usado dentro de um servidor.');
-
-  const data = dataStore.load();
-  const userId = message.author.id;
-
-  if (data.users[userId]) {
-    const u = data.users[userId];
-    return message.reply(`Você já tem ID: ${u.id} | ${u.nick}`);
-  }
-
-  const assignedId = data.nextId || START_ID;
-  data.users[userId] = { id: assignedId, nick: message.author.username };
-  data.nextId = assignedId + 1;
-  dataStore.save(data);
-
-  // adiciona cargo (se configurado)
-  try {
-    if (ID_ROLE_ID) {
-      const member = await message.guild.members.fetch(userId);
-      await member.roles.add(ID_ROLE_ID);
-    }
-  } catch (err) {
-    console.warn('Falha ao adicionar cargo:', err?.message || err);
-  }
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('ver_id')
-      .setLabel('Ver meu ID')
-      .setStyle(ButtonStyle.Primary)
-  );
-
-  return message.reply({
-    content: `✅ Seu ID foi registrado: **${assignedId}** — você recebeu o cargo (se configurado).`,
-    components: [row],
-  });
+function setup(localClient, overrides = {}) {
+  client = localClient;
+  Object.assign(CONFIG, overrides);
 }
 
-module.exports = { handleIdCommand };
+function loadData() {
+  if (!fs.existsSync(CONFIG.DATA_FILE)) fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify({ nextId: 10, applications: {}, ids: {} }, null, 2));
+  try { return JSON.parse(fs.readFileSync(CONFIG.DATA_FILE, 'utf8') || '{}'); } catch { return { nextId: 10, applications: {}, ids: {} }; }
+}
+function saveData(data) { fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(data, null, 2)); }
+
+function makeNickname(id, name) {
+  const base = `${id} | ${name}`;
+  if (base.length <= 32) return base;
+  const idLen = String(id).length;
+  const maxNameLen = 32 - (idLen + 3);
+  return `${id} | ${name.slice(0, Math.max(0, maxNameLen))}`;
+}
+
+async function onIdCommand(message) {
+  try {
+    if (!message.guild) return message.reply({ content: 'Este comando só funciona em servidor.', ephemeral: true });
+    const member = message.member;
+    if (!member) return message.reply({ content: 'Não consegui obter seu membro no servidor.', ephemeral: true });
+
+    const data = loadData();
+    data.ids = data.ids || {};
+
+    let assigned = data.ids[member.id];
+    if (!assigned) {
+      assigned = data.nextId || 10;
+      data.nextId = Number(assigned) + 1;
+      data.ids[member.id] = assigned;
+      saveData(data);
+    }
+
+    // aplica cargo "com id" se configurado
+    try {
+      if (CONFIG.WL_ROLE_ID && CONFIG.WL_ROLE_ID !== 'COLE_AQUI_WL_ROLE_ID') {
+        await member.roles.add(CONFIG.WL_ROLE_ID, 'Assigned via !id');
+      }
+    } catch (err) {
+      console.error('Erro ao adicionar cargo WL_ROLE_ID via !id', err);
+    }
+
+    // atualiza nickname
+    const newNick = makeNickname(assigned, member.nickname || member.user.username);
+    try {
+      if (member.manageable) await member.setNickname(newNick, 'Assigned via !id');
+    } catch (err) {
+      console.error('Erro ao setNickname via !id', err);
+    }
+
+    return message.reply({ content: `✅ Seu ID é **${assigned}** — nick: \`${newNick}\``, ephemeral: false });
+  } catch (err) {
+    console.error('onIdCommand error', err);
+    return message.reply({ content: 'Erro ao processar seu ID.', ephemeral: true });
+  }
+}
+
+module.exports = { setup, onIdCommand, CONFIG };
