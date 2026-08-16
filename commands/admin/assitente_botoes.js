@@ -195,9 +195,9 @@ async function handleInteraction(interaction) {
     try {
       if (CONFIG.STAFF_CHANNEL_ID && CONFIG.STAFF_CHANNEL_ID !== 'COLE_AQUI_STAFF_CHANNEL_ID') {
         const ch = await client.channels.fetch(CONFIG.STAFF_CHANNEL_ID).catch(()=>null);
-        if (ch) await ch.send(`Erro assistente_botoes: ${err && err.stack ? err.stack : err}`); 
+        if (ch) await ch.send(`Erro assistente_botoes: ${err && err.stack ? err.stack : String(err)}`);
       }
-    } catch {}
+    } catch (e) { /* ignore */ }
     return true;
   }
 }

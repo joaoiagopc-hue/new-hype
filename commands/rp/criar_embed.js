@@ -28,7 +28,7 @@ module.exports = {
         .setColor('#000000')
         .setFooter({ text: `Criado por ${message.author.tag}` });
 
-      // envia embed e apaga o comando e a mensagem do usuário (se possível)
+      // envia embed e apaga o comando e a mensagem do usuário
       const sent = await message.channel.send({ embeds: [embed] }).catch(err => {
         console.error('Erro enviando embed:', err && err.stack ? err.stack : err);
       });
